@@ -15,10 +15,12 @@ pub struct Config {
     /// Audit policy settings
     pub policy: PolicyConfig,
     /// Logging configuration
+    #[serde(default)]
     pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct ServerConfig {
     /// Listen address (e.g., "127.0.0.1:8080")
     pub listen: String,
@@ -38,6 +40,21 @@ impl Default for ServerConfig {
     }
 }
 
+/// Upstream API protocol
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UpstreamProtocol {
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+}
+
+impl Default for UpstreamProtocol {
+    fn default() -> Self {
+        Self::OpenAi
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpstreamConfig {
     /// Upstream API base URL (e.g., "https://api.openai.com/v1")
@@ -46,6 +63,9 @@ pub struct UpstreamConfig {
     pub api_key: Option<String>,
     /// Default model to use
     pub default_model: String,
+    /// Upstream API protocol: "openai" (default) or "anthropic"
+    #[serde(default)]
+    pub protocol: UpstreamProtocol,
     /// Additional headers to pass to upstream
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
@@ -157,6 +177,7 @@ impl Default for PolicyConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     /// Log level: "trace", "debug", "info", "warn", "error"
     #[serde(default = "default_log_level")]

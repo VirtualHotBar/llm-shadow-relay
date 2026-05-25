@@ -1,5 +1,6 @@
 //! Protocol types for LLM Shadow Relay
 
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -310,6 +311,96 @@ pub fn extract_anthropic_text(resp: &AnthropicResponse) -> String {
         .filter_map(|b| b.text.as_deref())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Convert canonical ChatCompletionRequest to Anthropic API request JSON
+pub fn openai_to_anthropic_request(req: &ChatCompletionRequest) -> serde_json::Value {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut system = None;
+
+    for msg in &req.messages {
+        match msg.role.as_str() {
+            "system" => {
+                system = Some(msg.content.clone());
+            }
+            "user" | "assistant" => {
+                messages.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": msg.content
+                }));
+            }
+            _ => {
+                // Include other roles as-is (e.g., "tool")
+                messages.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": msg.content
+                }));
+            }
+        }
+    }
+
+    let mut body = serde_json::json!({
+        "model": req.model,
+        "max_tokens": req.max_tokens.unwrap_or(4096),
+        "messages": messages,
+    });
+
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys);
+    }
+    if let Some(temp) = req.temperature {
+        body["temperature"] = serde_json::json!(temp);
+    }
+    if req.stream.unwrap_or(false) {
+        body["stream"] = serde_json::json!(true);
+    }
+
+    body
+}
+
+/// Parse Anthropic API response into canonical ChatCompletionResponse
+pub fn anthropic_response_to_openai(body: &str) -> Result<ChatCompletionResponse> {
+    let resp: AnthropicResponse = serde_json::from_str(body)
+        .map_err(|e| Error::InvalidResponse(format!("Failed to parse Anthropic response: {}", e)))?;
+
+    let content = extract_anthropic_text(&resp);
+
+    let finish_reason = resp.stop_reason.as_deref().map(|r| match r {
+        "end_turn" => "stop",
+        "max_tokens" => "length",
+        "tool_use" => "tool_calls",
+        other => other,
+    }).map(String::from);
+
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    Ok(ChatCompletionResponse {
+        id: resp.id,
+        object: "chat.completion".to_string(),
+        created,
+        model: resp.model,
+        choices: vec![Choice {
+            index: 0,
+            message: OpenAiMessage {
+                role: "assistant".to_string(),
+                content,
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            finish_reason,
+            logprobs: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: resp.usage.input_tokens,
+            completion_tokens: resp.usage.output_tokens,
+            total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
+        }),
+        system_fingerprint: None,
+    })
 }
 
 #[cfg(test)]

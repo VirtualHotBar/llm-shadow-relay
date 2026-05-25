@@ -27,6 +27,10 @@ api_key = ""
 # Default model to use if not specified in request
 default_model = "gpt-4o"
 
+# Upstream API protocol: "openai" (default) or "anthropic"
+# When set to "anthropic", requests are sent to {base_url}/messages with x-api-key auth.
+protocol = "openai"
+
 # Additional headers to pass to upstream
 # extra_headers = { "X-Custom-Header" = "value" }
 

@@ -1,11 +1,12 @@
 //! Proxy handler for LLM Shadow Relay - routes requests to upstream and audits responses
 
 use crate::audit::AuditEngine;
-use crate::config::{AuditMode, UpstreamConfig};
+use crate::config::{AuditMode, UpstreamConfig, UpstreamProtocol};
 use crate::error::{Error, Result};
 use crate::protocol::{
-    anthropic_to_openai, extract_anthropic_text, openai_to_anthropic, AnthropicRequest,
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ContentExtractor,
+    anthropic_response_to_openai, anthropic_to_openai, extract_anthropic_text,
+    openai_to_anthropic, openai_to_anthropic_request, AnthropicRequest, ChatCompletionChunk,
+    ChatCompletionRequest, ChatCompletionResponse, ContentExtractor,
 };
 use crate::sse::parse_sse_stream;
 use axum::{
@@ -92,12 +93,8 @@ pub async fn handle_chat_completion(
         return Err(Error::UpstreamApi(status.as_u16(), body_text.to_string()));
     }
 
-    // Parse the response
-    let response: ChatCompletionResponse = serde_json::from_str(&body_text)
-        .map_err(|e| {
-            error!("Failed to parse upstream response: {}. Raw body (first 500 chars): {}", e, &body_text[..body_text.len().min(500)]);
-            Error::InvalidResponse(format!("Failed to parse upstream response: {}", e))
-        })?;
+    // Parse the response (protocol-aware)
+    let response: ChatCompletionResponse = parse_upstream_response(&state, &body_text)?;
 
     // Extract content for auditing
     let content = ContentExtractor::extract_text(&response);
@@ -295,11 +292,8 @@ pub async fn handle_anthropic_completion(
         return Err(Error::UpstreamApi(status.as_u16(), body_text.to_string()));
     }
 
-    // Parse as OpenAI response
-    let openai_resp: ChatCompletionResponse = serde_json::from_str(&body_text).map_err(|e| {
-        error!("Failed to parse upstream response: {}. Raw: {}", e, &body_text[..body_text.len().min(500)]);
-        Error::InvalidResponse(format!("Failed to parse upstream response: {}", e))
-    })?;
+    // Parse response (protocol-aware) into canonical OpenAI format
+    let openai_resp: ChatCompletionResponse = parse_upstream_response(&state, &body_text)?;
 
     // Convert to Anthropic format
     let anthropic_resp = openai_to_anthropic(openai_resp);
@@ -345,14 +339,14 @@ pub async fn handle_anthropic_completion(
     }
 }
 
-/// Forward request to upstream (non-streaming)
-async fn forward_to_upstream(
+/// Forward request to upstream (non-streaming) — OpenAI protocol
+async fn forward_to_upstream_openai(
     state: &Arc<AppState>,
     request: &ChatCompletionRequest,
 ) -> Result<reqwest::Response> {
     let upstream_url = format!("{}/chat/completions", state.upstream.base_url);
 
-    debug!("Forwarding to upstream: {}", upstream_url);
+    debug!("Forwarding to upstream (OpenAI): {}", upstream_url);
 
     let mut req_builder = state.http_client
         .post(&upstream_url)
@@ -386,14 +380,70 @@ async fn forward_to_upstream(
     Ok(response)
 }
 
-/// Forward request to upstream (streaming)
-async fn forward_stream_to_upstream(
+/// Forward request to upstream (non-streaming) — Anthropic protocol
+async fn forward_to_upstream_anthropic(
+    state: &Arc<AppState>,
+    request: &ChatCompletionRequest,
+) -> Result<reqwest::Response> {
+    let upstream_url = format!("{}/messages", state.upstream.base_url);
+
+    debug!("Forwarding to upstream (Anthropic): {}", upstream_url);
+
+    // Convert canonical request to Anthropic format
+    let anthropic_body = openai_to_anthropic_request(request);
+
+    let mut req_builder = state.http_client
+        .post(&upstream_url)
+        .header("Content-Type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .timeout(std::time::Duration::from_secs(
+            state.upstream.timeout.unwrap_or(300)
+        ));
+
+    // Add API key (Anthropic uses x-api-key header)
+    if let Some(ref api_key) = state.upstream.api_key {
+        req_builder = req_builder.header("x-api-key", api_key);
+    }
+
+    // Add extra headers
+    for (key, value) in &state.upstream.extra_headers {
+        req_builder = req_builder.header(key.as_str(), value.as_str());
+    }
+
+    let response = req_builder
+        .json(&anthropic_body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let error_text = response.text().await.unwrap_or_default();
+        error!("Upstream (Anthropic) returned error: {} - {}", status, error_text);
+        return Err(Error::UpstreamApi(status, error_text));
+    }
+
+    Ok(response)
+}
+
+/// Forward request to upstream (non-streaming) — dispatches by protocol
+async fn forward_to_upstream(
+    state: &Arc<AppState>,
+    request: &ChatCompletionRequest,
+) -> Result<reqwest::Response> {
+    match state.upstream.protocol {
+        UpstreamProtocol::OpenAi => forward_to_upstream_openai(state, request).await,
+        UpstreamProtocol::Anthropic => forward_to_upstream_anthropic(state, request).await,
+    }
+}
+
+/// Forward request to upstream (streaming) — OpenAI protocol
+async fn forward_stream_to_upstream_openai(
     state: &Arc<AppState>,
     request: &ChatCompletionRequest,
 ) -> Result<reqwest::Response> {
     let upstream_url = format!("{}/chat/completions", state.upstream.base_url);
 
-    debug!("Forwarding streaming to upstream: {}", upstream_url);
+    debug!("Forwarding streaming to upstream (OpenAI): {}", upstream_url);
 
     let mut req_builder = state.http_client
         .post(&upstream_url)
@@ -426,6 +476,82 @@ async fn forward_stream_to_upstream(
     }
 
     Ok(response)
+}
+
+/// Forward request to upstream (streaming) — Anthropic protocol
+/// NOTE: Anthropic SSE uses different event names. This is a basic pass-through.
+async fn forward_stream_to_upstream_anthropic(
+    state: &Arc<AppState>,
+    request: &ChatCompletionRequest,
+) -> Result<reqwest::Response> {
+    let upstream_url = format!("{}/messages", state.upstream.base_url);
+
+    debug!("Forwarding streaming to upstream (Anthropic): {}", upstream_url);
+
+    // Build Anthropic request with stream=true
+    let mut anthropic_body = openai_to_anthropic_request(request);
+    anthropic_body["stream"] = serde_json::json!(true);
+
+    let mut req_builder = state.http_client
+        .post(&upstream_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("anthropic-version", "2023-06-01")
+        .timeout(std::time::Duration::from_secs(
+            state.upstream.timeout.unwrap_or(300)
+        ));
+
+    // Add API key (Anthropic uses x-api-key header)
+    if let Some(ref api_key) = state.upstream.api_key {
+        req_builder = req_builder.header("x-api-key", api_key);
+    }
+
+    // Add extra headers
+    for (key, value) in &state.upstream.extra_headers {
+        req_builder = req_builder.header(key.as_str(), value.as_str());
+    }
+
+    let response = req_builder
+        .json(&anthropic_body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let error_text = response.text().await.unwrap_or_default();
+        error!("Upstream streaming (Anthropic) returned error: {} - {}", status, error_text);
+        return Err(Error::UpstreamApi(status, error_text));
+    }
+
+    Ok(response)
+}
+
+/// Forward request to upstream (streaming) — dispatches by protocol
+async fn forward_stream_to_upstream(
+    state: &Arc<AppState>,
+    request: &ChatCompletionRequest,
+) -> Result<reqwest::Response> {
+    match state.upstream.protocol {
+        UpstreamProtocol::OpenAi => forward_stream_to_upstream_openai(state, request).await,
+        UpstreamProtocol::Anthropic => forward_stream_to_upstream_anthropic(state, request).await,
+    }
+}
+
+/// Parse upstream response body into canonical ChatCompletionResponse
+fn parse_upstream_response(
+    state: &AppState,
+    body_text: &str,
+) -> Result<ChatCompletionResponse> {
+    match state.upstream.protocol {
+        UpstreamProtocol::OpenAi => serde_json::from_str(body_text).map_err(|e| {
+            Error::InvalidResponse(format!(
+                "Failed to parse OpenAI upstream response: {}. Raw (first 500): {}",
+                e,
+                &body_text[..body_text.len().min(500)]
+            ))
+        }),
+        UpstreamProtocol::Anthropic => anthropic_response_to_openai(body_text),
+    }
 }
 
 /// Health check endpoint

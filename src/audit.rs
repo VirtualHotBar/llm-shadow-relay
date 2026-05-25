@@ -364,9 +364,57 @@ Respond with JSON only:
 
         // Parse response
         let response_text = response.text().await?;
-        let decision = self.parse_audit_response(&response_text)?;
+        // Extract the actual model output from the API response wrapper
+        let audit_content = self.extract_audit_content(&response_text)?;
+        let decision = self.parse_audit_response(&audit_content)?;
 
         Ok(decision)
+    }
+
+    /// Extract the actual model output content from an API response wrapper
+    fn extract_audit_content(&self, response: &str) -> Result<String> {
+        let parsed: serde_json::Value = serde_json::from_str(response)
+            .map_err(|e| Error::AuditFailed(format!("Failed to parse audit API response: {}", e)))?;
+
+        let content = match self.config.provider.as_str() {
+            "anthropic" => {
+                // Anthropic response: content[0].text
+                parsed["content"][0]["text"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        Error::AuditFailed("No text content in Anthropic audit response".to_string())
+                    })?
+                    .to_string()
+            }
+            "ollama" | "local" => {
+                // Ollama/local may return various formats:
+                // {"response": "..."} or {"message": {"content": "..."}} or {"content": "..."}
+                parsed["response"]
+                    .as_str()
+                    .or_else(|| parsed["message"]["content"].as_str())
+                    .or_else(|| parsed["content"].as_str())
+                    .ok_or_else(|| {
+                        Error::AuditFailed(
+                            "Could not find content in Ollama/local audit response".to_string(),
+                        )
+                    })?
+                    .to_string()
+            }
+            _ => {
+                // OpenAI-compatible: choices[0].message.content
+                parsed["choices"][0]["message"]["content"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        Error::AuditFailed(
+                            "No content in OpenAI audit response (choices[0].message.content)"
+                                .to_string(),
+                        )
+                    })?
+                    .to_string()
+            }
+        };
+
+        Ok(content)
     }
 
     /// Parse the audit model's response

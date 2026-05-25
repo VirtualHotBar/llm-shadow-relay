@@ -65,6 +65,7 @@ fn build_app_state(config: &Config) -> Arc<AppState> {
         base_url: config.upstream.base_url.clone(),
         api_key: config.upstream.api_key.clone(),
         default_model: config.upstream.default_model.clone(),
+        protocol: config.upstream.protocol.clone(),
         extra_headers: config.upstream.extra_headers.clone(),
         timeout: config.upstream.timeout,
     };
