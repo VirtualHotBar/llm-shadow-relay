@@ -1,0 +1,112 @@
+# LLM Shadow Relay Configuration
+# Copy this file to config.toml and customize
+
+[server]
+# Server binding address
+listen = "127.0.0.1:8080"
+
+# Request timeout in seconds
+timeout = 300
+
+# Maximum request body size in MB
+max_request_mb = 10
+
+[upstream]
+# Upstream API base URL (the potentially untrusted source)
+# Examples:
+#   - OpenAI: "https://api.openai.com/v1"
+#   - Anthropic: "https://api.anthropic.com"
+#   - Local LLM: "http://localhost:11434/v1"
+#   - Custom proxy: "https://your-proxy.example.com/v1"
+base_url = "https://api.openai.com/v1"
+
+# API key for upstream (can also be set via LLM_AUDIT_UPSTREAM_API_KEY env var)
+# Leave empty to pass through from client request
+api_key = ""
+
+# Default model to use if not specified in request
+default_model = "gpt-4o"
+
+# Additional headers to pass to upstream
+# extra_headers = { "X-Custom-Header" = "value" }
+
+# Timeout for upstream calls in seconds (optional, defaults to server.timeout)
+# timeout = 300
+
+[audit]
+# Audit model provider: "openai", "anthropic", "ollama", "local"
+provider = "openai"
+
+# Audit model base URL (for local/ollama, optional)
+# base_url = "http://localhost:11434/v1"
+
+# API key for audit model (optional for local models)
+# Can also be set via LLM_SHADOW_RELAY_AUDIT_API_KEY env var
+api_key = ""
+
+# Audit model name
+# Recommended: qwen2.5-8b, gpt-4o-mini, claude-3-haiku
+model = "gpt-4o-mini"
+
+# Temperature for audit model (lower = more deterministic)
+temperature = 0.1
+
+# Maximum tokens for audit response
+max_tokens = 2048
+
+# Whether to enable audit (can be disabled for testing)
+enabled = true
+
+# Batch size for streaming audit (number of chunks to accumulate before auditing)
+batch_size = 10
+
+# Whether to audit streaming responses in real-time
+stream_audit = true
+
+# Audit mode: "sync" (blocking, default) or "async" (non-blocking background)
+# In sync mode, the proxy blocks the response until audit completes.
+# In async mode, the response is returned immediately and audit runs in background.
+# mode = "async"
+
+# Custom audit system prompt (optional, has good defaults)
+# system_prompt = """
+# Your custom audit prompt here...
+# """
+
+[policy]
+# Risk levels that should block the response
+block_risk_levels = ["critical", "high"]
+
+# Whether to block on any detected injection attempt
+block_injection = true
+
+# Whether to block on detected prompt injection
+block_prompt_injection = true
+
+# Whether to block on detected system prompt extraction
+block_system_prompt_extraction = true
+
+# Whether to block on detected tool call insertion
+block_tool_call = true
+
+# Whether to log all audit decisions
+log_all = true
+
+# Whether to return audit metadata in response headers
+include_headers = true
+
+# Custom risk keywords to flag (additional to built-in)
+# custom_keywords = ["suspicious_keyword", "another_keyword"]
+
+[logging]
+# Log level: "trace", "debug", "info", "warn", "error"
+level = "info"
+
+# Whether to log audit decisions
+audit_log = true
+
+# Whether to log request/response bodies (be careful with secrets!)
+log_bodies = false
+
+# Log file path (optional, stdout if None)
+# log_file = "llm-shadow-relay.log"

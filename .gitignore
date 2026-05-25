@@ -1,0 +1,16 @@
+# Rust build output
+/target
+
+# Local configuration with API keys
+config.toml
+
+# Runtime artifacts
+*.log
+*.err
+proxy_output.log
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
