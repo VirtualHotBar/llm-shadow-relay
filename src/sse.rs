@@ -8,8 +8,6 @@ use futures::Stream;
 pub enum SseEvent {
     /// A complete SSE message (event + data)
     Message { event: Option<String>, data: String },
-    /// Comment line (starts with :)
-    Comment(String),
     /// Stream done ([DONE] marker)
     Done,
     /// Parse error
@@ -19,14 +17,12 @@ pub enum SseEvent {
 /// SSE parser that converts a byte stream into SSE events
 pub struct SseParser {
     buffer: String,
-    last_event: Option<String>,
 }
 
 impl SseParser {
     pub fn new() -> Self {
         Self {
             buffer: String::new(),
-            last_event: None,
         }
     }
 
@@ -56,7 +52,8 @@ impl SseParser {
             if line.is_empty() {
                 // Empty line = end of event
                 if !current_data.is_empty() || current_event.is_some() {
-                    let event = if current_data == "[DONE]" {
+                    let event = if current_data.trim_end() == "[DONE]" {
+                        current_data.clear();
                         SseEvent::Done
                     } else {
                         SseEvent::Message {
@@ -94,11 +91,6 @@ impl SseParser {
         events
     }
 
-    /// Reset the parser state
-    pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.last_event = None;
-    }
 }
 
 impl Default for SseParser {
