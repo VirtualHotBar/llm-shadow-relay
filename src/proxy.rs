@@ -77,7 +77,7 @@ pub async fn handle_chat_completion(
     }
 
     // Forward request to upstream (non-streaming)
-    let upstream_response = forward_to_upstream(&state, &request).await?;
+    let upstream_response = forward_to_upstream(&state, &request, false).await?;
 
     // Read raw body for debugging
     let status = upstream_response.status();
@@ -99,10 +99,10 @@ pub async fn handle_chat_completion(
     // Extract content for auditing
     let content = ContentExtractor::extract_text(&response);
 
-    // Determine audit mode and handle accordingly
-    let audit_mode = {
+    // Determine audit mode and whether to include headers
+    let (audit_mode, include_headers) = {
         let engine = state.audit_engine.read().await;
-        engine.audit_mode()
+        (engine.audit_mode(), engine.policy_include_headers())
     };
 
     match audit_mode {
@@ -117,10 +117,12 @@ pub async fn handle_chat_completion(
             });
 
             let mut response_builder = Json(response).into_response();
-            response_builder.headers_mut().insert(
-                "X-Audit-Mode",
-                HeaderValue::from_static("async"),
-            );
+            if include_headers {
+                response_builder.headers_mut().insert(
+                    "X-Audit-Mode",
+                    HeaderValue::from_static("async"),
+                );
+            }
             Ok(response_builder)
         }
         AuditMode::Sync => {
@@ -136,16 +138,18 @@ pub async fn handle_chat_completion(
                 ));
             }
 
-            // Add audit headers
+            // Add audit headers if policy allows
             let mut response_builder = Json(response).into_response();
-            response_builder.headers_mut().insert(
-                "X-Audit-Risk-Level",
-                HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
-            );
-            response_builder.headers_mut().insert(
-                "X-Audit-Risk-Score",
-                HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
-            );
+            if include_headers {
+                response_builder.headers_mut().insert(
+                    "X-Audit-Risk-Level",
+                    HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
+                );
+                response_builder.headers_mut().insert(
+                    "X-Audit-Risk-Score",
+                    HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
+                );
+            }
             Ok(response_builder)
         }
     }
@@ -167,7 +171,7 @@ pub async fn handle_chat_completion_stream(
     request.stream = Some(true);
 
     // Forward request to upstream and get streaming response
-    let response = forward_stream_to_upstream(&state, &request).await?;
+    let response = forward_to_upstream(&state, &request, true).await?;
 
     // Get the response body
     let body = response.bytes_stream();
@@ -186,19 +190,24 @@ pub async fn handle_chat_completion_stream(
             // In sync mode, do per-chunk lightweight audit
             if let AuditMode::Sync = audit_mode {
                 if let crate::sse::SseEvent::Message { event: _, data } = &sse_event {
-                    if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
-                        let content = ContentExtractor::extract_from_chunk(&chunk);
-                        let engine = audit_engine.clone();
-                        tokio::spawn(async move {
-                            if !content.is_empty() {
-                                let engine = engine.read().await;
-                                if let Ok(decision) = engine.audit_streaming_chunk(&content).await {
-                                    if !decision.allowed {
-                                        warn!("Streaming chunk flagged: {:?}", decision.blocked_reason);
+                    match serde_json::from_str::<ChatCompletionChunk>(data) {
+                        Ok(chunk) => {
+                            let content = ContentExtractor::extract_from_chunk(&chunk);
+                            let engine = audit_engine.clone();
+                            tokio::spawn(async move {
+                                if !content.is_empty() {
+                                    let engine = engine.read().await;
+                                    if let Ok(decision) = engine.audit_streaming_chunk(&content).await {
+                                        if !decision.allowed {
+                                            warn!("Streaming chunk flagged: {:?}", decision.blocked_reason);
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse SSE chunk as ChatCompletionChunk: {}", e);
+                        }
                     }
                 }
             }
@@ -279,7 +288,7 @@ pub async fn handle_anthropic_completion(
     }
 
     // Forward to upstream
-    let upstream_response = forward_to_upstream(&state, &openai_req).await?;
+    let upstream_response = forward_to_upstream(&state, &openai_req, false).await?;
     let status = upstream_response.status();
     let body_bytes = upstream_response
         .bytes()
@@ -301,9 +310,9 @@ pub async fn handle_anthropic_completion(
     // Extract & audit response content
     let content = extract_anthropic_text(&anthropic_resp);
 
-    let audit_mode = {
+    let (audit_mode, include_headers) = {
         let engine = state.audit_engine.read().await;
-        engine.audit_mode()
+        (engine.audit_mode(), engine.policy_include_headers())
     };
 
     match audit_mode {
@@ -314,7 +323,9 @@ pub async fn handle_anthropic_completion(
                 engine.audit_async(&content, "anthropic-response").await;
             });
             let mut resp = Json(anthropic_resp).into_response();
-            resp.headers_mut().insert("X-Audit-Mode", HeaderValue::from_static("async"));
+            if include_headers {
+                resp.headers_mut().insert("X-Audit-Mode", HeaderValue::from_static("async"));
+            }
             Ok(resp)
         }
         AuditMode::Sync => {
@@ -326,215 +337,83 @@ pub async fn handle_anthropic_completion(
                 ));
             }
             let mut resp = Json(anthropic_resp).into_response();
-            resp.headers_mut().insert(
-                "X-Audit-Risk-Level",
-                HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
-            );
-            resp.headers_mut().insert(
-                "X-Audit-Risk-Score",
-                HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
-            );
+            if include_headers {
+                resp.headers_mut().insert(
+                    "X-Audit-Risk-Level",
+                    HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
+                );
+                resp.headers_mut().insert(
+                    "X-Audit-Risk-Score",
+                    HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
+                );
+            }
             Ok(resp)
         }
     }
 }
 
-/// Forward request to upstream (non-streaming) — OpenAI protocol
-async fn forward_to_upstream_openai(
-    state: &Arc<AppState>,
-    request: &ChatCompletionRequest,
-) -> Result<reqwest::Response> {
-    let upstream_url = format!("{}/chat/completions", state.upstream.base_url);
-
-    debug!("Forwarding to upstream (OpenAI): {}", upstream_url);
-
-    let mut req_builder = state.http_client
-        .post(&upstream_url)
-        .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(
-            state.upstream.timeout.unwrap_or(300)
-        ));
-
-    // Add API key if provided
-    if let Some(ref api_key) = state.upstream.api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
-    }
-
-    // Add extra headers
-    for (key, value) in &state.upstream.extra_headers {
-        req_builder = req_builder.header(key.as_str(), value.as_str());
-    }
-
-    let response = req_builder
-        .json(request)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let error_text = response.text().await.unwrap_or_default();
-        error!("Upstream returned error: {} - {}", status, error_text);
-        return Err(Error::UpstreamApi(status, error_text));
-    }
-
-    Ok(response)
-}
-
-/// Forward request to upstream (non-streaming) — Anthropic protocol
-async fn forward_to_upstream_anthropic(
-    state: &Arc<AppState>,
-    request: &ChatCompletionRequest,
-) -> Result<reqwest::Response> {
-    let upstream_url = format!("{}/messages", state.upstream.base_url);
-
-    debug!("Forwarding to upstream (Anthropic): {}", upstream_url);
-
-    // Convert canonical request to Anthropic format
-    let anthropic_body = openai_to_anthropic_request(request);
-
-    let mut req_builder = state.http_client
-        .post(&upstream_url)
-        .header("Content-Type", "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(
-            state.upstream.timeout.unwrap_or(300)
-        ));
-
-    // Add API key (Anthropic uses x-api-key header)
-    if let Some(ref api_key) = state.upstream.api_key {
-        req_builder = req_builder.header("x-api-key", api_key);
-    }
-
-    // Add extra headers
-    for (key, value) in &state.upstream.extra_headers {
-        req_builder = req_builder.header(key.as_str(), value.as_str());
-    }
-
-    let response = req_builder
-        .json(&anthropic_body)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let error_text = response.text().await.unwrap_or_default();
-        error!("Upstream (Anthropic) returned error: {} - {}", status, error_text);
-        return Err(Error::UpstreamApi(status, error_text));
-    }
-
-    Ok(response)
-}
-
-/// Forward request to upstream (non-streaming) — dispatches by protocol
+/// Forward request to upstream — dispatches by protocol and streaming mode
 async fn forward_to_upstream(
     state: &Arc<AppState>,
     request: &ChatCompletionRequest,
+    stream: bool,
 ) -> Result<reqwest::Response> {
-    match state.upstream.protocol {
-        UpstreamProtocol::OpenAi => forward_to_upstream_openai(state, request).await,
-        UpstreamProtocol::Anthropic => forward_to_upstream_anthropic(state, request).await,
-    }
-}
+    let (endpoint, auth_header, auth_value, accept_header, body) = match state.upstream.protocol {
+        UpstreamProtocol::OpenAi => {
+            let url = format!("{}/chat/completions", state.upstream.base_url);
+            let req_body = serde_json::to_value(request).map_err(|e| {
+                Error::InvalidRequest(format!("Failed to serialize request: {}", e))
+            })?;
+            (url, "Authorization", format!("Bearer {}", state.upstream.api_key.as_deref().unwrap_or("")), "text/event-stream", req_body)
+        }
+        UpstreamProtocol::Anthropic => {
+            let url = format!("{}/messages", state.upstream.base_url);
+            let mut req_body = openai_to_anthropic_request(request);
+            if stream {
+                req_body["stream"] = serde_json::json!(true);
+            }
+            (url, "x-api-key", state.upstream.api_key.as_deref().unwrap_or("").to_string(), "text/event-stream", req_body)
+        }
+    };
 
-/// Forward request to upstream (streaming) — OpenAI protocol
-async fn forward_stream_to_upstream_openai(
-    state: &Arc<AppState>,
-    request: &ChatCompletionRequest,
-) -> Result<reqwest::Response> {
-    let upstream_url = format!("{}/chat/completions", state.upstream.base_url);
-
-    debug!("Forwarding streaming to upstream (OpenAI): {}", upstream_url);
+    debug!(
+        "Forwarding to upstream ({:?}): {} (stream={})",
+        state.upstream.protocol, endpoint, stream
+    );
 
     let mut req_builder = state.http_client
-        .post(&upstream_url)
+        .post(&endpoint)
         .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
         .timeout(std::time::Duration::from_secs(
             state.upstream.timeout.unwrap_or(300)
         ));
 
-    // Add API key if provided
-    if let Some(ref api_key) = state.upstream.api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+    if stream {
+        req_builder = req_builder.header("Accept", accept_header);
     }
 
-    // Add extra headers
+    if state.upstream.protocol == UpstreamProtocol::Anthropic {
+        req_builder = req_builder.header("anthropic-version", "2023-06-01");
+    }
+
+    if !auth_value.is_empty() {
+        req_builder = req_builder.header(auth_header, &auth_value);
+    }
+
     for (key, value) in &state.upstream.extra_headers {
         req_builder = req_builder.header(key.as_str(), value.as_str());
     }
 
-    let response = req_builder
-        .json(request)
-        .send()
-        .await?;
+    let response = req_builder.json(&body).send().await?;
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
-        error!("Upstream streaming returned error: {} - {}", status, error_text);
+        error!("Upstream ({:?}) returned error: {} - {}", state.upstream.protocol, status, error_text);
         return Err(Error::UpstreamApi(status, error_text));
     }
 
     Ok(response)
-}
-
-/// Forward request to upstream (streaming) — Anthropic protocol
-/// NOTE: Anthropic SSE uses different event names. This is a basic pass-through.
-async fn forward_stream_to_upstream_anthropic(
-    state: &Arc<AppState>,
-    request: &ChatCompletionRequest,
-) -> Result<reqwest::Response> {
-    let upstream_url = format!("{}/messages", state.upstream.base_url);
-
-    debug!("Forwarding streaming to upstream (Anthropic): {}", upstream_url);
-
-    // Build Anthropic request with stream=true
-    let mut anthropic_body = openai_to_anthropic_request(request);
-    anthropic_body["stream"] = serde_json::json!(true);
-
-    let mut req_builder = state.http_client
-        .post(&upstream_url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(
-            state.upstream.timeout.unwrap_or(300)
-        ));
-
-    // Add API key (Anthropic uses x-api-key header)
-    if let Some(ref api_key) = state.upstream.api_key {
-        req_builder = req_builder.header("x-api-key", api_key);
-    }
-
-    // Add extra headers
-    for (key, value) in &state.upstream.extra_headers {
-        req_builder = req_builder.header(key.as_str(), value.as_str());
-    }
-
-    let response = req_builder
-        .json(&anthropic_body)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        let error_text = response.text().await.unwrap_or_default();
-        error!("Upstream streaming (Anthropic) returned error: {} - {}", status, error_text);
-        return Err(Error::UpstreamApi(status, error_text));
-    }
-
-    Ok(response)
-}
-
-/// Forward request to upstream (streaming) — dispatches by protocol
-async fn forward_stream_to_upstream(
-    state: &Arc<AppState>,
-    request: &ChatCompletionRequest,
-) -> Result<reqwest::Response> {
-    match state.upstream.protocol {
-        UpstreamProtocol::OpenAi => forward_stream_to_upstream_openai(state, request).await,
-        UpstreamProtocol::Anthropic => forward_stream_to_upstream_anthropic(state, request).await,
-    }
 }
 
 /// Parse upstream response body into canonical ChatCompletionResponse
@@ -556,11 +435,10 @@ fn parse_upstream_response(
 
 /// Health check endpoint
 pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let _audit_engine = state.audit_engine.read().await;
-    
-    // Check if audit is enabled by trying to access config
-    // Since config is private, we assume it's enabled if the engine exists
-    let audit_enabled = true; // Engine exists means audit is configured
+    let audit_enabled = {
+        let engine = state.audit_engine.read().await;
+        engine.is_enabled()
+    };
     
     Json(HealthResponse {
         status: "healthy".to_string(),

@@ -20,7 +20,7 @@ max_request_mb = 10
 #   - Custom proxy: "https://your-proxy.example.com/v1"
 base_url = "https://api.openai.com/v1"
 
-# API key for upstream (can also be set via LLM_AUDIT_UPSTREAM_API_KEY env var)
+# API key for upstream (can also be set via LLM_SHADOW_RELAY_UPSTREAM_API_KEY env var)
 # Leave empty to pass through from client request
 api_key = ""
 

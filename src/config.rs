@@ -41,7 +41,7 @@ impl Default for ServerConfig {
 }
 
 /// Upstream API protocol
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UpstreamProtocol {
     #[serde(rename = "openai")]
     OpenAi,

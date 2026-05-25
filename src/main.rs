@@ -12,6 +12,7 @@ use axum::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -54,12 +55,12 @@ fn build_app_state(config: &Config) -> Arc<AppState> {
         custom_keywords: config.policy.custom_keywords.clone(),
     };
 
-    let audit_engine = AuditEngine::new(audit_config, policy_config);
-
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config.server.timeout))
         .build()
         .expect("Failed to build HTTP client");
+
+    let audit_engine = AuditEngine::new(audit_config, policy_config, http_client.clone());
 
     let upstream_config = UpstreamConfig {
         base_url: config.upstream.base_url.clone(),
@@ -141,6 +142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Add CORS and tracing layers
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+        // Enforce max request body size from config
+        .layer(RequestBodyLimitLayer::new(config.server.max_request_mb * 1024 * 1024))
         .with_state(state);
 
     // Start the server
@@ -153,6 +156,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Proxy ready at http://{}/v1/chat/completions", addr);
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutting down gracefully...");
+        })
         .await?;
 
     Ok(())

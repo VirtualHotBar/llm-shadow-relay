@@ -15,13 +15,13 @@ pub struct AuditEngine {
 }
 
 impl AuditEngine {
-    /// Create a new audit engine
-    pub fn new(config: AuditConfig, policy: PolicyConfig) -> Self {
+    /// Create a new audit engine with a shared HTTP client
+    pub fn new(config: AuditConfig, policy: PolicyConfig, client: Client) -> Self {
         let system_prompt = Self::build_system_prompt(&config, &policy);
         let audit_schema = Self::build_audit_schema();
 
         Self {
-            client: Client::new(),
+            client,
             config,
             policy,
             system_prompt,
@@ -32,6 +32,16 @@ impl AuditEngine {
     /// Returns the current audit mode
     pub fn audit_mode(&self) -> AuditMode {
         self.config.mode.clone()
+    }
+
+    /// Returns whether audit is currently enabled
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// Returns whether audit headers should be included in responses
+    pub fn policy_include_headers(&self) -> bool {
+        self.policy.include_headers
     }
 
     /// Async audit: runs audit in background, logs result, never blocks the caller.

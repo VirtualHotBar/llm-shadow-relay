@@ -184,6 +184,14 @@ pub struct AnthropicRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 /// Anthropic chat completion response
@@ -253,11 +261,11 @@ pub fn anthropic_to_openai(req: AnthropicRequest, default_model: &str) -> ChatCo
         model,
         messages,
         temperature: req.temperature,
-        top_p: None,
+        top_p: req.top_p,
         max_tokens: Some(req.max_tokens),
         stream: req.stream,
         tools: None,
-        stop: None,
+        stop: req.stop_sequences,
         presence_penalty: None,
         frequency_penalty: None,
         user: None,
