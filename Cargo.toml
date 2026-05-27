@@ -33,6 +33,7 @@ async-stream = "0.3"
 # Utilities
 bytes = "1"
 thiserror = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-test = "0.4"

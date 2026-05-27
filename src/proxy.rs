@@ -4,9 +4,9 @@ use crate::audit::AuditEngine;
 use crate::config::{AuditMode, UpstreamConfig, UpstreamProtocol};
 use crate::error::{Error, Result};
 use crate::protocol::{
-    anthropic_response_to_openai, anthropic_to_openai, extract_anthropic_text,
-    openai_to_anthropic, openai_to_anthropic_request, AnthropicRequest, ChatCompletionChunk,
-    ChatCompletionRequest, ChatCompletionResponse, ContentExtractor,
+    anthropic_response_to_openai, anthropic_to_openai, extract_anthropic_text, openai_to_anthropic,
+    openai_to_anthropic_request, AnthropicRequest, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, ContentExtractor,
 };
 use crate::sse::parse_sse_stream;
 use axum::{
@@ -39,7 +39,9 @@ pub struct HealthResponse {
 
 /// Extract all user message text from a request for auditing
 fn extract_request_content(request: &ChatCompletionRequest) -> String {
-    request.messages.iter()
+    request
+        .messages
+        .iter()
         .filter(|m| m.role == "user" || m.role == "system")
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
@@ -64,9 +66,14 @@ pub async fn handle_chat_completion(
         let audit_engine = state.audit_engine.read().await;
         let request_decision = audit_engine.audit_request(&request_content).await?;
         if !request_decision.allowed {
-            warn!("Request blocked by pre-request audit: {:?}", request_decision.blocked_reason);
+            warn!(
+                "Request blocked by pre-request audit: {:?}",
+                request_decision.blocked_reason
+            );
             return Err(Error::AuditBlocked(
-                request_decision.blocked_reason.unwrap_or_else(|| "Request blocked: prompt injection detected".to_string())
+                request_decision
+                    .blocked_reason
+                    .unwrap_or_else(|| "Request blocked: prompt injection detected".to_string()),
             ));
         }
     }
@@ -81,11 +88,16 @@ pub async fn handle_chat_completion(
 
     // Read raw body for debugging
     let status = upstream_response.status();
-    let body_bytes = upstream_response.bytes().await
-        .map_err(|e| Error::InvalidResponse(format!("Failed to read upstream response body: {}", e)))?;
+    let body_bytes = upstream_response.bytes().await.map_err(|e| {
+        Error::InvalidResponse(format!("Failed to read upstream response body: {}", e))
+    })?;
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    debug!("Upstream response status: {}, body preview: {}", status, &body_text[..body_text.len().min(200)]);
+    debug!(
+        "Upstream response status: {}, body preview: {}",
+        status,
+        &body_text[..body_text.len().min(200)]
+    );
 
     // Check if upstream returned an error
     if !status.is_success() {
@@ -118,10 +130,9 @@ pub async fn handle_chat_completion(
 
             let mut response_builder = Json(response).into_response();
             if include_headers {
-                response_builder.headers_mut().insert(
-                    "X-Audit-Mode",
-                    HeaderValue::from_static("async"),
-                );
+                response_builder
+                    .headers_mut()
+                    .insert("X-Audit-Mode", HeaderValue::from_static("async"));
             }
             Ok(response_builder)
         }
@@ -134,7 +145,9 @@ pub async fn handle_chat_completion(
             if !decision.allowed {
                 warn!("Request blocked by audit: {:?}", decision.blocked_reason);
                 return Err(Error::AuditBlocked(
-                    decision.blocked_reason.unwrap_or_else(|| "Audit blocked".to_string())
+                    decision
+                        .blocked_reason
+                        .unwrap_or_else(|| "Audit blocked".to_string()),
                 ));
             }
 
@@ -143,11 +156,13 @@ pub async fn handle_chat_completion(
             if include_headers {
                 response_builder.headers_mut().insert(
                     "X-Audit-Risk-Level",
-                    HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
+                    HeaderValue::from_str(&decision.risk_level)
+                        .unwrap_or(HeaderValue::from_static("none")),
                 );
                 response_builder.headers_mut().insert(
                     "X-Audit-Risk-Score",
-                    HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
+                    HeaderValue::from_str(&decision.risk_score.to_string())
+                        .unwrap_or(HeaderValue::from_static("0")),
                 );
             }
             Ok(response_builder)
@@ -160,7 +175,10 @@ pub async fn handle_chat_completion_stream(
     State(state): State<Arc<AppState>>,
     Json(mut request): Json<ChatCompletionRequest>,
 ) -> Result<Response> {
-    info!("Handling streaming chat completion, model: {}", request.model);
+    info!(
+        "Handling streaming chat completion, model: {}",
+        request.model
+    );
 
     // Use default model if not specified
     if request.model.is_empty() {
@@ -185,58 +203,103 @@ pub async fn handle_chat_completion_stream(
     // Parse SSE and audit in real-time (sync mode) or pass through (async mode)
     let audit_engine = state.audit_engine.clone();
 
-    let stream = parse_sse_stream(body)
-        .map(move |sse_event| {
-            // In sync mode, do per-chunk lightweight audit
-            if let AuditMode::Sync = audit_mode {
-                if let crate::sse::SseEvent::Message { event: _, data } = &sse_event {
-                    match serde_json::from_str::<ChatCompletionChunk>(data) {
+    let stream = async_stream::stream! {
+        let parsed_stream = parse_sse_stream(body);
+        tokio::pin!(parsed_stream);
+        let mut audit_buffer = String::new();
+        let mut async_audit_buffer = String::new();
+
+        while let Some(sse_event) = parsed_stream.next().await {
+            match sse_event {
+                crate::sse::SseEvent::Message { event: _, data } => {
+                    let mut extracted_content = String::new();
+
+                    match serde_json::from_str::<ChatCompletionChunk>(&data) {
                         Ok(chunk) => {
-                            let content = ContentExtractor::extract_from_chunk(&chunk);
-                            let engine = audit_engine.clone();
-                            tokio::spawn(async move {
-                                if !content.is_empty() {
-                                    let engine = engine.read().await;
-                                    if let Ok(decision) = engine.audit_streaming_chunk(&content).await {
-                                        if !decision.allowed {
-                                            warn!("Streaming chunk flagged: {:?}", decision.blocked_reason);
-                                        }
-                                    }
-                                }
-                            });
+                            extracted_content = ContentExtractor::extract_from_chunk(&chunk);
                         }
                         Err(e) => {
                             warn!("Failed to parse SSE chunk as ChatCompletionChunk: {}", e);
                         }
                     }
-                }
-            }
-            // In async mode, skip per-chunk audit; the full response audit
-            // happens in background after the stream completes
 
-            // Forward the SSE event to the client
-            Ok::<_, std::convert::Infallible>(sse_event)
-        })
-        .filter_map(|r| async move {
-            match r {
-                Ok(crate::sse::SseEvent::Message { event: _, data }) => {
-                    let mut event = Event::default();
-                    event = event.data(data);
-                    Some(Ok::<axum::response::sse::Event, std::convert::Infallible>(event))
+                    if !extracted_content.is_empty() {
+                        match &audit_mode {
+                            AuditMode::Sync => {
+                                audit_buffer.push_str(&extracted_content);
+                                if audit_buffer.chars().count() > 4000 {
+                                    audit_buffer = audit_buffer
+                                        .chars()
+                                        .rev()
+                                        .take(4000)
+                                        .collect::<String>()
+                                        .chars()
+                                        .rev()
+                                        .collect();
+                                }
+
+                                let decision = {
+                                    let engine = audit_engine.read().await;
+                                    engine.audit_streaming_chunk(&audit_buffer).await
+                                };
+
+                                match decision {
+                                    Ok(decision) if !decision.allowed => {
+                                        warn!("Streaming response blocked by audit: {:?}", decision.blocked_reason);
+                                        let error = serde_json::json!({
+                                            "error": {
+                                                "message": decision.blocked_reason.unwrap_or_else(|| "Streaming response blocked by audit".to_string()),
+                                                "type": "llm_shadow_audit_blocked"
+                                            }
+                                        });
+                                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(error.to_string()));
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("Streaming audit failed: {}", e);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            AuditMode::Async => {
+                                async_audit_buffer.push_str(&extracted_content);
+                                if async_audit_buffer.chars().count() > 16000 {
+                                    async_audit_buffer = async_audit_buffer
+                                        .chars()
+                                        .rev()
+                                        .take(16000)
+                                        .collect::<String>()
+                                        .chars()
+                                        .rev()
+                                        .collect();
+                                }
+                            }
+                        }
+                    }
+
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(data));
                 }
-                Ok(crate::sse::SseEvent::Done) => {
-                    let mut event = Event::default();
-                    event = event.data("[DONE]");
-                    Some(Ok::<axum::response::sse::Event, std::convert::Infallible>(event))
+                crate::sse::SseEvent::Done => {
+                    if let AuditMode::Async = &audit_mode {
+                        if !async_audit_buffer.is_empty() {
+                            let engine = audit_engine.clone();
+                            let content = async_audit_buffer.clone();
+                            tokio::spawn(async move {
+                                let engine = engine.read().await;
+                                engine.audit_async(&content, "streaming-response").await;
+                            });
+                        }
+                    }
+
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().data("[DONE]"));
+                    break;
                 }
-                Ok(crate::sse::SseEvent::Error(e)) => {
-                    let mut event = Event::default();
-                    event = event.data(format!("{{\"error\":\"{}\"}}", e));
-                    Some(Ok::<axum::response::sse::Event, std::convert::Infallible>(event))
+                crate::sse::SseEvent::Error(e) => {
+                    yield Ok::<Event, std::convert::Infallible>(Event::default().data(format!("{{\"error\":\"{}\"}}", e)));
                 }
-                _ => None,
             }
-        });
+        }
+    };
 
     let sse_stream = Sse::new(stream);
 
@@ -262,7 +325,10 @@ pub async fn handle_anthropic_completion(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AnthropicRequest>,
 ) -> Result<Response> {
-    info!("Handling Anthropic completion request, model: {}", request.model);
+    info!(
+        "Handling Anthropic completion request, model: {}",
+        request.model
+    );
 
     // Streaming for Anthropic is not yet supported
     if request.stream.unwrap_or(false) {
@@ -280,9 +346,14 @@ pub async fn handle_anthropic_completion(
         let audit_engine = state.audit_engine.read().await;
         let decision = audit_engine.audit_request(&request_content).await?;
         if !decision.allowed {
-            warn!("Anthropic request blocked by audit: {:?}", decision.blocked_reason);
+            warn!(
+                "Anthropic request blocked by audit: {:?}",
+                decision.blocked_reason
+            );
             return Err(Error::AuditBlocked(
-                decision.blocked_reason.unwrap_or_else(|| "Request blocked".to_string()),
+                decision
+                    .blocked_reason
+                    .unwrap_or_else(|| "Request blocked".to_string()),
             ));
         }
     }
@@ -324,7 +395,8 @@ pub async fn handle_anthropic_completion(
             });
             let mut resp = Json(anthropic_resp).into_response();
             if include_headers {
-                resp.headers_mut().insert("X-Audit-Mode", HeaderValue::from_static("async"));
+                resp.headers_mut()
+                    .insert("X-Audit-Mode", HeaderValue::from_static("async"));
             }
             Ok(resp)
         }
@@ -333,18 +405,22 @@ pub async fn handle_anthropic_completion(
             let decision = engine.audit_response(&content).await?;
             if !decision.allowed {
                 return Err(Error::AuditBlocked(
-                    decision.blocked_reason.unwrap_or_else(|| "Audit blocked".to_string()),
+                    decision
+                        .blocked_reason
+                        .unwrap_or_else(|| "Audit blocked".to_string()),
                 ));
             }
             let mut resp = Json(anthropic_resp).into_response();
             if include_headers {
                 resp.headers_mut().insert(
                     "X-Audit-Risk-Level",
-                    HeaderValue::from_str(&decision.risk_level).unwrap_or(HeaderValue::from_static("none")),
+                    HeaderValue::from_str(&decision.risk_level)
+                        .unwrap_or(HeaderValue::from_static("none")),
                 );
                 resp.headers_mut().insert(
                     "X-Audit-Risk-Score",
-                    HeaderValue::from_str(&decision.risk_score.to_string()).unwrap_or(HeaderValue::from_static("0")),
+                    HeaderValue::from_str(&decision.risk_score.to_string())
+                        .unwrap_or(HeaderValue::from_static("0")),
                 );
             }
             Ok(resp)
@@ -364,7 +440,13 @@ async fn forward_to_upstream(
             let req_body = serde_json::to_value(request).map_err(|e| {
                 Error::InvalidRequest(format!("Failed to serialize request: {}", e))
             })?;
-            (url, "Authorization", format!("Bearer {}", state.upstream.api_key.as_deref().unwrap_or("")), "text/event-stream", req_body)
+            (
+                url,
+                "Authorization",
+                format!("Bearer {}", state.upstream.api_key.as_deref().unwrap_or("")),
+                "text/event-stream",
+                req_body,
+            )
         }
         UpstreamProtocol::Anthropic => {
             let url = format!("{}/messages", state.upstream.base_url);
@@ -372,7 +454,13 @@ async fn forward_to_upstream(
             if stream {
                 req_body["stream"] = serde_json::json!(true);
             }
-            (url, "x-api-key", state.upstream.api_key.as_deref().unwrap_or("").to_string(), "text/event-stream", req_body)
+            (
+                url,
+                "x-api-key",
+                state.upstream.api_key.as_deref().unwrap_or("").to_string(),
+                "text/event-stream",
+                req_body,
+            )
         }
     };
 
@@ -381,11 +469,12 @@ async fn forward_to_upstream(
         state.upstream.protocol, endpoint, stream
     );
 
-    let mut req_builder = state.http_client
+    let mut req_builder = state
+        .http_client
         .post(&endpoint)
         .header("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(
-            state.upstream.timeout.unwrap_or(300)
+            state.upstream.timeout.unwrap_or(300),
         ));
 
     if stream {
@@ -409,7 +498,10 @@ async fn forward_to_upstream(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
-        error!("Upstream ({:?}) returned error: {} - {}", state.upstream.protocol, status, error_text);
+        error!(
+            "Upstream ({:?}) returned error: {} - {}",
+            state.upstream.protocol, status, error_text
+        );
         return Err(Error::UpstreamApi(status, error_text));
     }
 
@@ -417,10 +509,7 @@ async fn forward_to_upstream(
 }
 
 /// Parse upstream response body into canonical ChatCompletionResponse
-fn parse_upstream_response(
-    state: &AppState,
-    body_text: &str,
-) -> Result<ChatCompletionResponse> {
+fn parse_upstream_response(state: &AppState, body_text: &str) -> Result<ChatCompletionResponse> {
     match state.upstream.protocol {
         UpstreamProtocol::OpenAi => serde_json::from_str(body_text).map_err(|e| {
             Error::InvalidResponse(format!(
@@ -439,7 +528,7 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
         let engine = state.audit_engine.read().await;
         engine.is_enabled()
     };
-    
+
     Json(HealthResponse {
         status: "healthy".to_string(),
         audit_enabled,

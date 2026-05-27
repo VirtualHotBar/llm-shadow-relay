@@ -1,13 +1,26 @@
 //! Protocol types for LLM Shadow Relay
 
 use crate::error::{Error, Result};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+fn deserialize_string_or_null_default<'de, D>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+        .map(|value| value.unwrap_or_default())
+        .map_err(de::Error::custom)
+}
 
 /// OpenAI-style message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiMessage {
     pub role: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_null_default")]
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -143,7 +156,9 @@ pub struct ContentExtractor;
 impl ContentExtractor {
     /// Extract all text content from a response for auditing
     pub fn extract_text(response: &ChatCompletionResponse) -> String {
-        response.choices.iter()
+        response
+            .choices
+            .iter()
             .map(|c| Self::extract_from_message(&c.message))
             .collect::<Vec<_>>()
             .join("\n")
@@ -151,15 +166,53 @@ impl ContentExtractor {
 
     /// Extract all text content from a streaming chunk
     pub fn extract_from_chunk(chunk: &ChatCompletionChunk) -> String {
-        chunk.choices.iter()
+        chunk
+            .choices
+            .iter()
             .filter_map(|c| c.delta.as_ref())
-            .filter_map(|d| d.content.clone())
-            .collect()
+            .map(Self::extract_from_delta)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Extract text from a message
     pub fn extract_from_message(message: &OpenAiMessage) -> String {
-        message.content.clone()
+        let mut parts = Vec::new();
+
+        if !message.content.is_empty() {
+            parts.push(message.content.clone());
+        }
+
+        if let Some(tool_calls) = &message.tool_calls {
+            if let Ok(serialized) = serde_json::to_string(tool_calls) {
+                parts.push(format!("tool_calls: {}", serialized));
+            }
+        }
+
+        parts.join("\n")
+    }
+
+    fn extract_from_delta(delta: &Delta) -> String {
+        let mut parts = Vec::new();
+
+        if let Some(content) = &delta.content {
+            if !content.is_empty() {
+                parts.push(content.clone());
+            }
+        }
+
+        if let Some(tool_calls) = &delta.tool_calls {
+            if let Ok(serialized) = serde_json::to_string(tool_calls) {
+                parts.push(format!("tool_calls: {}", serialized));
+            }
+        }
+
+        if let Some(function_call) = &delta.function_call {
+            parts.push(format!("function_call: {}", function_call));
+        }
+
+        parts.join("\n")
     }
 }
 
@@ -368,17 +421,22 @@ pub fn openai_to_anthropic_request(req: &ChatCompletionRequest) -> serde_json::V
 
 /// Parse Anthropic API response into canonical ChatCompletionResponse
 pub fn anthropic_response_to_openai(body: &str) -> Result<ChatCompletionResponse> {
-    let resp: AnthropicResponse = serde_json::from_str(body)
-        .map_err(|e| Error::InvalidResponse(format!("Failed to parse Anthropic response: {}", e)))?;
+    let resp: AnthropicResponse = serde_json::from_str(body).map_err(|e| {
+        Error::InvalidResponse(format!("Failed to parse Anthropic response: {}", e))
+    })?;
 
     let content = extract_anthropic_text(&resp);
 
-    let finish_reason = resp.stop_reason.as_deref().map(|r| match r {
-        "end_turn" => "stop",
-        "max_tokens" => "length",
-        "tool_use" => "tool_calls",
-        other => other,
-    }).map(String::from);
+    let finish_reason = resp
+        .stop_reason
+        .as_deref()
+        .map(|r| match r {
+            "end_turn" => "stop",
+            "max_tokens" => "length",
+            "tool_use" => "tool_calls",
+            other => other,
+        })
+        .map(String::from);
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -422,24 +480,58 @@ mod tests {
             object: "chat.completion".to_string(),
             created: 1234567890,
             model: "gpt-4".to_string(),
-            choices: vec![
-                Choice {
-                    index: 0,
-                    message: OpenAiMessage {
-                        role: "assistant".to_string(),
-                        content: "Hello, world!".to_string(),
-                        name: None,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    },
-                    finish_reason: Some("stop".to_string()),
-                    logprobs: None,
-                }
-            ],
+            choices: vec![Choice {
+                index: 0,
+                message: OpenAiMessage {
+                    role: "assistant".to_string(),
+                    content: "Hello, world!".to_string(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+            }],
             usage: None,
             system_fingerprint: None,
         };
 
         assert_eq!(ContentExtractor::extract_text(&response), "Hello, world!");
+    }
+
+    #[test]
+    fn test_extract_tool_calls() {
+        let response = ChatCompletionResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "gpt-4".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: OpenAiMessage {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    name: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "send_email".to_string(),
+                            arguments: r#"{"to":"attacker@example.com"}"#.to_string(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let extracted = ContentExtractor::extract_text(&response);
+        assert!(extracted.contains("tool_calls"));
+        assert!(extracted.contains("send_email"));
+        assert!(extracted.contains("attacker@example.com"));
     }
 }
