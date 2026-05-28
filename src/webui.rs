@@ -207,7 +207,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       background: var(--surface);
       padding: 14px;
       display: grid;
-      grid-template-rows: auto auto 1fr;
+      grid-template-rows: auto auto auto minmax(260px, 1fr);
       gap: 12px;
     }
 
@@ -322,6 +322,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       flex: 1 1 auto;
     }
 
+    .lang-select {
+      width: auto;
+      min-width: 96px;
+      min-height: 28px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
     .output-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(260px, 34%);
@@ -403,6 +411,46 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       padding: 0;
     }
 
+    .agent-picker {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .history-list {
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .history-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .history-title {
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .history-subtitle {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
     .warn-text {
       color: var(--warn);
     }
@@ -433,6 +481,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }
 
       .grid-2 {
+        grid-template-columns: 1fr;
+      }
+
+      .agent-picker {
         grid-template-columns: 1fr;
       }
 
@@ -472,9 +524,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       </div>
       <div class="status-strip">
         <span class="pill"><span class="dot" id="healthDot"></span><span id="healthText">checking</span></span>
-        <span class="pill">audit <span id="auditState">-</span></span>
-        <span class="pill">agents <span id="agentCount">-</span></span>
-        <button class="icon" id="refreshHealth" title="Refresh health" aria-label="Refresh health">↻</button>
+        <span class="pill"><span data-i18n="audit">audit</span> <span id="auditState">-</span></span>
+        <span class="pill"><span data-i18n="agents">agents</span> <span id="agentCount">-</span></span>
+        <select id="languageSelect" class="lang-select" aria-label="Language">
+          <option value="auto">Auto</option>
+          <option value="en">English</option>
+          <option value="zh">中文</option>
+        </select>
+        <button class="icon" id="refreshHealth" title="Refresh health" aria-label="Refresh health" data-i18n-title="refreshHealth" data-i18n-aria="refreshHealth">↻</button>
       </div>
     </header>
 
@@ -482,7 +539,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <aside class="rail">
         <section class="panel">
           <div class="panel-head">
-            <h2 class="panel-title">Route</h2>
+            <h2 class="panel-title" data-i18n="route">Route</h2>
           </div>
           <div class="fields">
             <div class="segmented" aria-label="Protocol">
@@ -490,29 +547,35 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <button id="protoAnthropic" type="button">Anthropic</button>
             </div>
             <label>
-              Agent ID
-              <input id="agentId" placeholder="default">
+              <span data-i18n="agentId">Agent ID</span>
+              <div class="agent-picker">
+                <select id="agentSelect">
+                  <option value="">default</option>
+                  <option value="__custom">custom</option>
+                </select>
+                <input id="agentId" placeholder="custom agent id" data-i18n-placeholder="customAgentId">
+              </div>
             </label>
             <div class="grid-2">
               <label>
-                Model
+                <span data-i18n="model">Model</span>
                 <input id="model" value="gpt-4o">
               </label>
               <label>
-                Max tokens
+                <span data-i18n="maxTokens">Max tokens</span>
                 <input id="maxTokens" type="number" min="1" value="512">
               </label>
             </div>
             <label class="inline">
               <input id="stream" type="checkbox">
-              <span>Stream</span>
+              <span data-i18n="stream">Stream</span>
             </label>
           </div>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2 class="panel-title">Headers</h2>
+            <h2 class="panel-title" data-i18n="headersPanel">Headers</h2>
           </div>
           <div class="fields">
             <label>
@@ -520,7 +583,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
               <input id="authHeader" placeholder="Bearer ...">
             </label>
             <label>
-              Extra JSON
+              <span data-i18n="extraJson">Extra JSON</span>
               <textarea id="extraHeaders" spellcheck="false">{
   "x-request-id": "ui-demo"
 }</textarea>
@@ -528,11 +591,23 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           </div>
         </section>
 
+        <section class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title" data-i18n="history">History</h2>
+            <div class="toolbar">
+              <button id="clearHistory" class="icon" title="Clear history" aria-label="Clear history" data-i18n-title="clearHistory" data-i18n-aria="clearHistory">×</button>
+            </div>
+          </div>
+          <div class="history-list" id="historyList">
+            <div class="subtle" data-i18n="noRequests">No requests yet.</div>
+          </div>
+        </section>
+
         <section class="panel request-area">
           <div class="panel-head">
-            <h2 class="panel-title">Request</h2>
+            <h2 class="panel-title" data-i18n="request">Request</h2>
             <div class="toolbar">
-              <button id="formatBody" class="icon" title="Format JSON" aria-label="Format JSON">{}</button>
+              <button id="formatBody" class="icon" title="Format JSON" aria-label="Format JSON" data-i18n-title="formatJson" data-i18n-aria="formatJson">{}</button>
             </div>
           </div>
           <textarea id="bodyEditor" spellcheck="false"></textarea>
@@ -542,12 +617,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       <section class="workspace">
         <section class="panel">
           <div class="panel-head">
-            <h2 class="panel-title">Dispatch</h2>
+            <h2 class="panel-title" data-i18n="dispatch">Dispatch</h2>
             <div class="toolbar">
               <span class="subtle" id="endpointPreview"></span>
               <span class="spacer"></span>
-              <button id="copyCurl" type="button">Copy cURL</button>
-              <button id="sendRequest" class="primary" type="button">Send</button>
+              <button id="previewRequest" type="button" data-i18n="preview">Preview</button>
+              <button id="copyCurl" type="button" data-i18n="copyCurl">Copy cURL</button>
+              <button id="abortRequest" type="button" disabled data-i18n="abort">Abort</button>
+              <button id="sendRequest" class="primary" type="button" data-i18n="send">Send</button>
             </div>
           </div>
         </section>
@@ -555,9 +632,10 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
         <div class="output-grid">
           <section class="panel">
             <div class="panel-head">
-              <h2 class="panel-title">Response</h2>
+              <h2 class="panel-title" data-i18n="response">Response</h2>
               <div class="toolbar">
-                <button id="clearOutput" class="icon" title="Clear response" aria-label="Clear response">×</button>
+                <button id="copyResponse" type="button" data-i18n="copyResponse">Copy response</button>
+                <button id="clearOutput" class="icon" title="Clear response" aria-label="Clear response" data-i18n-title="clearResponse" data-i18n-aria="clearResponse">×</button>
               </div>
             </div>
             <pre class="codebox" id="responseBox">No response yet.</pre>
@@ -565,7 +643,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
           <section class="panel">
             <div class="panel-head">
-              <h2 class="panel-title">Metadata</h2>
+              <h2 class="panel-title" data-i18n="metadata">Metadata</h2>
             </div>
             <div class="meta-list" id="metaList"></div>
           </section>
@@ -575,9 +653,127 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   </div>
 
   <script>
+    const I18N = {
+      en: {
+        abort: "Abort",
+        aborted: "aborted",
+        agents: "agents",
+        agentId: "Agent ID",
+        audit: "audit",
+        authConfigured: "configured",
+        authPassthrough: "client passthrough",
+        checking: "checking",
+        clearHistory: "Clear history",
+        clearResponse: "Clear response",
+        clientError: "client error",
+        copied: "copied",
+        copyCurl: "Copy cURL",
+        copyHistoryCurl: "cURL",
+        copyResponse: "Copy response",
+        customAgentId: "custom agent id",
+        dispatch: "Dispatch",
+        emptyStream: "(empty stream)",
+        extraJson: "Extra JSON",
+        formatJson: "Format JSON",
+        headersPanel: "Headers",
+        headersOff: "passthrough off",
+        headersOn: "passthrough on",
+        health: "health",
+        healthy: "healthy",
+        history: "History",
+        historyCleared: "cleared",
+        historyCurl: "history cURL",
+        historyRestored: "restored",
+        invalid: "invalid",
+        maxTokens: "Max tokens",
+        metadata: "Metadata",
+        model: "Model",
+        noRequests: "No requests yet.",
+        noResponse: "No response yet.",
+        offline: "offline",
+        off: "off",
+        on: "on",
+        preview: "Preview",
+        request: "Request",
+        requestAborted: "Request aborted.",
+        requestAbortedByUser: "Request aborted by user",
+        response: "Response",
+        route: "Route",
+        send: "Send",
+        sending: "Sending...",
+        use: "Use",
+        stream: "Stream",
+        uiConfig: "ui config",
+        unavailable: "unavailable",
+        unreachable: "unreachable",
+        updated: "updated"
+      },
+      zh: {
+        abort: "中止",
+        aborted: "已中止",
+        agents: "智能体",
+        agentId: "Agent ID",
+        audit: "审计",
+        authConfigured: "已配置",
+        authPassthrough: "客户端透传",
+        checking: "检查中",
+        clearHistory: "清空历史",
+        clearResponse: "清空响应",
+        clientError: "客户端错误",
+        copied: "已复制",
+        copyCurl: "复制 cURL",
+        copyHistoryCurl: "cURL",
+        copyResponse: "复制响应",
+        customAgentId: "自定义 agent id",
+        dispatch: "发送",
+        emptyStream: "(空流)",
+        extraJson: "额外 JSON",
+        formatJson: "格式化 JSON",
+        headersPanel: "请求头",
+        headersOff: "透传关闭",
+        headersOn: "透传开启",
+        health: "健康",
+        healthy: "健康",
+        history: "历史",
+        historyCleared: "已清空",
+        historyCurl: "历史 cURL",
+        historyRestored: "已恢复",
+        invalid: "无效",
+        maxTokens: "最大 tokens",
+        metadata: "元数据",
+        model: "模型",
+        noRequests: "暂无请求。",
+        noResponse: "暂无响应。",
+        offline: "离线",
+        off: "关",
+        on: "开",
+        preview: "预览",
+        request: "请求",
+        requestAborted: "请求已中止。",
+        requestAbortedByUser: "用户已中止请求",
+        response: "响应",
+        route: "路由",
+        send: "发送",
+        sending: "发送中...",
+        use: "使用",
+        stream: "流式",
+        uiConfig: "UI 配置",
+        unavailable: "不可用",
+        unreachable: "不可达",
+        updated: "更新时间"
+      }
+    };
+
+    const LANGUAGE_STORAGE_KEY = "llm-shadow-relay-language";
+
     const state = {
       protocol: "openai",
-      lastCurl: ""
+      lastCurl: "",
+      uiConfig: null,
+      activeController: null,
+      history: [],
+      language: "en",
+      languageMode: "auto"
     };
 
     const els = {
@@ -586,31 +782,119 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       healthText: document.getElementById("healthText"),
       auditState: document.getElementById("auditState"),
       agentCount: document.getElementById("agentCount"),
+      languageSelect: document.getElementById("languageSelect"),
       refreshHealth: document.getElementById("refreshHealth"),
       protoOpenAI: document.getElementById("protoOpenAI"),
       protoAnthropic: document.getElementById("protoAnthropic"),
+      agentSelect: document.getElementById("agentSelect"),
       agentId: document.getElementById("agentId"),
       model: document.getElementById("model"),
       maxTokens: document.getElementById("maxTokens"),
       stream: document.getElementById("stream"),
       authHeader: document.getElementById("authHeader"),
       extraHeaders: document.getElementById("extraHeaders"),
+      clearHistory: document.getElementById("clearHistory"),
+      historyList: document.getElementById("historyList"),
       bodyEditor: document.getElementById("bodyEditor"),
       formatBody: document.getElementById("formatBody"),
       endpointPreview: document.getElementById("endpointPreview"),
+      previewRequest: document.getElementById("previewRequest"),
       copyCurl: document.getElementById("copyCurl"),
+      abortRequest: document.getElementById("abortRequest"),
       sendRequest: document.getElementById("sendRequest"),
+      copyResponse: document.getElementById("copyResponse"),
       clearOutput: document.getElementById("clearOutput"),
       responseBox: document.getElementById("responseBox"),
       metaList: document.getElementById("metaList")
     };
 
+    function resolveLanguage(mode) {
+      if (mode === "zh" || mode === "en") return mode;
+      return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+    }
+
+    function t(key) {
+      return I18N[state.language]?.[key] || I18N.en[key] || key;
+    }
+
+    function storedLanguageMode() {
+      try {
+        const value = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+        return ["auto", "en", "zh"].includes(value) ? value : "auto";
+      } catch (_) {
+        return "auto";
+      }
+    }
+
+    function storeLanguageMode(mode) {
+      try {
+        localStorage.setItem(LANGUAGE_STORAGE_KEY, mode);
+      } catch (_) {
+        // Language preference is convenience-only; ignore restricted storage.
+      }
+    }
+
+    function setLanguage(mode, persist = true) {
+      state.languageMode = mode;
+      state.language = resolveLanguage(mode);
+      document.documentElement.lang = state.language === "zh" ? "zh-CN" : "en";
+      els.languageSelect.value = mode;
+      if (persist) storeLanguageMode(mode);
+      applyI18n();
+    }
+
+    function applyI18n() {
+      document.querySelectorAll("[data-i18n]").forEach((node) => {
+        node.textContent = t(node.dataset.i18n);
+      });
+      document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
+        node.setAttribute("placeholder", t(node.dataset.i18nPlaceholder));
+      });
+      document.querySelectorAll("[data-i18n-title]").forEach((node) => {
+        node.setAttribute("title", t(node.dataset.i18nTitle));
+      });
+      document.querySelectorAll("[data-i18n-aria]").forEach((node) => {
+        node.setAttribute("aria-label", t(node.dataset.i18nAria));
+      });
+      renderHistory();
+      if (els.responseBox.textContent === I18N.en.noResponse || els.responseBox.textContent === I18N.zh.noResponse) {
+        els.responseBox.textContent = t("noResponse");
+      }
+      if ([I18N.en.healthy, I18N.zh.healthy].includes(els.healthText.textContent)) {
+        els.healthText.textContent = t("healthy");
+      }
+      if ([I18N.en.checking, I18N.zh.checking].includes(els.healthText.textContent)) {
+        els.healthText.textContent = t("checking");
+      }
+      if ([I18N.en.offline, I18N.zh.offline].includes(els.healthText.textContent)) {
+        els.healthText.textContent = t("offline");
+      }
+      if ([I18N.en.on, I18N.zh.on].includes(els.auditState.textContent)) {
+        els.auditState.textContent = t("on");
+      }
+      if ([I18N.en.off, I18N.zh.off].includes(els.auditState.textContent)) {
+        els.auditState.textContent = t("off");
+      }
+    }
+
     function endpointPath() {
-      const agent = els.agentId.value.trim();
+      const agent = selectedAgentId();
       const base = agent ? `/v1/agents/${encodeURIComponent(agent)}` : "/v1";
       return state.protocol === "openai"
         ? `${base}/chat/completions`
         : `${base}/messages`;
+    }
+
+    function selectedAgentId() {
+      return els.agentSelect.value === "__custom"
+        ? els.agentId.value.trim()
+        : els.agentSelect.value.trim();
+    }
+
+    function selectedRouteConfig() {
+      const id = selectedAgentId();
+      if (!id || !state.uiConfig) return state.uiConfig?.upstream || null;
+      return state.uiConfig.agents.find((agent) => agent.id === id) || null;
     }
 
     function defaultBody() {
@@ -638,9 +922,14 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       state.protocol = protocol;
       els.protoOpenAI.classList.toggle("active", protocol === "openai");
       els.protoAnthropic.classList.toggle("active", protocol === "anthropic");
-      els.model.value = protocol === "openai" ? "gpt-4o" : "claude-3-haiku-20240307";
+      const route = selectedRouteConfig();
+      els.model.value = route?.default_model || fallbackModel(protocol);
       writeBody(defaultBody());
       updateEndpointPreview();
+    }
+
+    function fallbackModel(protocol) {
+      return protocol === "openai" ? "gpt-4o" : "claude-3-haiku-20240307";
     }
 
     function writeBody(value) {
@@ -685,6 +974,68 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       els.endpointPreview.textContent = endpointPath();
     }
 
+    async function loadUiConfig() {
+      try {
+        const response = await fetch("/ui/config");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.uiConfig = await response.json();
+        applyUiConfig();
+      } catch (error) {
+        renderMeta([
+          ["ui config", "unavailable"],
+          ["error", error.message]
+        ]);
+      }
+    }
+
+    function applyUiConfig() {
+      if (!state.uiConfig) return;
+
+      els.agentSelect.innerHTML = [
+        `<option value="">default</option>`,
+        ...state.uiConfig.agents.map((agent) =>
+          `<option value="${escapeAttribute(agent.id)}">${escapeHtml(agent.id)}</option>`
+        ),
+        `<option value="__custom">custom</option>`
+      ].join("");
+
+      const protocol = state.uiConfig.upstream.protocol || "openai";
+      updateProtocol(protocol);
+      els.agentCount.textContent = state.uiConfig.agents.length;
+      els.auditState.textContent = state.uiConfig.audit.enabled ? t("on") : t("off");
+      renderRouteMeta();
+    }
+
+    function updateAgentSelection() {
+      const custom = els.agentSelect.value === "__custom";
+      els.agentId.disabled = !custom;
+      if (!custom) els.agentId.value = "";
+
+      const route = selectedRouteConfig();
+      if (route) {
+        updateProtocol(route.protocol || "openai");
+      } else {
+        updateEndpointPreview();
+      }
+      renderRouteMeta();
+    }
+
+    function renderRouteMeta() {
+      const route = selectedRouteConfig();
+      if (!route) return;
+      renderMeta([
+        ["route", selectedAgentId() || "default"],
+        ["protocol", route.protocol],
+        ["model", route.default_model],
+        ["headers", route.pass_through_headers ? t("headersOn") : t("headersOff")],
+        ["auth", route.has_configured_api_key ? t("authConfigured") : t("authPassthrough")]
+      ]);
+    }
+
+    function escapeAttribute(value) {
+      return escapeHtml(String(value)).replaceAll("'", "&#39;");
+    }
+
     function renderMeta(rows) {
       els.metaList.innerHTML = rows.map(([key, value]) => `
         <div class="meta-row">
@@ -709,24 +1060,193 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       return `curl ${JSON.stringify(location.origin + path)} \\\n${headerFlags}\n  -d ${JSON.stringify(JSON.stringify(body))}`;
     }
 
+    function requestPreview() {
+      const path = endpointPath();
+      const headers = collectHeaders();
+      const body = collectBody();
+      return {
+        method: "POST",
+        url: location.origin + path,
+        headers: redactHeaders(headers),
+        body
+      };
+    }
+
+    function requestSnapshot(kind) {
+      const path = endpointPath();
+      const headers = collectHeaders();
+      const body = collectBody();
+      return {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        kind,
+        time: new Date().toLocaleTimeString(),
+        protocol: state.protocol,
+        agent: selectedAgentId(),
+        model: body.model || "",
+        path,
+        headers,
+        body,
+        auth: els.authHeader.value,
+        extraHeadersText: els.extraHeaders.value,
+        maxTokens: els.maxTokens.value,
+        stream: els.stream.checked
+      };
+    }
+
+    function pushHistory(snapshot) {
+      state.history = [
+        snapshot,
+        ...state.history.filter((item) => item.path !== snapshot.path || item.model !== snapshot.model)
+      ].slice(0, 8);
+      renderHistory();
+    }
+
+    function renderHistory() {
+      if (state.history.length === 0) {
+        els.historyList.innerHTML = `<div class="subtle">${escapeHtml(t("noRequests"))}</div>`;
+        return;
+      }
+
+      els.historyList.innerHTML = state.history.map((item) => `
+        <div class="history-item">
+          <div>
+            <div class="history-title">${escapeHtml(item.time)} · ${escapeHtml(item.model || "model")}</div>
+            <div class="history-subtitle">${escapeHtml(item.kind)} · ${escapeHtml(item.path)}</div>
+          </div>
+          <div class="toolbar">
+            <button type="button" data-history-use="${escapeAttribute(item.id)}">${escapeHtml(t("use"))}</button>
+            <button type="button" data-history-curl="${escapeAttribute(item.id)}">${escapeHtml(t("copyHistoryCurl"))}</button>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function historyItem(id) {
+      return state.history.find((item) => item.id === id);
+    }
+
+    function restoreHistory(id) {
+      const item = historyItem(id);
+      if (!item) return;
+
+      if (item.agent) {
+        const hasConfiguredAgent = Array.from(els.agentSelect.options).some((option) => option.value === item.agent);
+        els.agentSelect.value = hasConfiguredAgent ? item.agent : "__custom";
+        els.agentId.disabled = hasConfiguredAgent;
+        els.agentId.value = hasConfiguredAgent ? "" : item.agent;
+      } else {
+        els.agentSelect.value = "";
+        els.agentId.disabled = true;
+        els.agentId.value = "";
+      }
+
+      updateProtocol(item.protocol);
+      els.authHeader.value = item.auth || "";
+      els.extraHeaders.value = item.extraHeadersText || "{}";
+      els.maxTokens.value = item.maxTokens || "512";
+      els.stream.checked = item.stream;
+      els.model.value = item.model || "";
+      writeBody(item.body);
+      updateEndpointPreview();
+      renderMeta([
+        [t("history"), t("historyRestored")],
+        ["endpoint", item.path],
+        ["time", item.time]
+      ]);
+    }
+
+    async function copyHistoryCurl(id) {
+      const item = historyItem(id);
+      if (!item) return;
+      await writeClipboard(makeCurl(item.path, item.headers, item.body));
+      renderMeta([
+        [t("copied"), t("historyCurl")],
+        ["endpoint", item.path]
+      ]);
+    }
+
+    function onHistoryClick(event) {
+      const useId = event.target?.dataset?.historyUse;
+      const curlId = event.target?.dataset?.historyCurl;
+      if (useId) restoreHistory(useId);
+      if (curlId) copyHistoryCurl(curlId);
+    }
+
+    function clearHistory() {
+      state.history = [];
+      renderHistory();
+      renderMeta([[t("history"), t("historyCleared")]]);
+    }
+
+    function previewRequest() {
+      try {
+        pushHistory(requestSnapshot("preview"));
+        const preview = requestPreview();
+        state.lastCurl = makeCurl(endpointPath(), collectHeaders(), preview.body);
+        els.responseBox.textContent = JSON.stringify(preview, null, 2);
+        renderMeta([
+          [t("preview"), t("request")],
+          ["endpoint", endpointPath()],
+          ["headers", JSON.stringify(preview.headers)]
+        ]);
+      } catch (error) {
+        els.responseBox.textContent = error.message;
+        renderMeta([
+          [t("preview"), t("invalid")],
+          ["error", error.message]
+        ]);
+      }
+    }
+
+    function redactHeaders(headers) {
+      const redacted = {};
+      for (const [key, value] of Object.entries(headers)) {
+        redacted[key] = shouldRedactHeader(key) ? redactSecret(String(value)) : String(value);
+      }
+      return redacted;
+    }
+
+    function responseHeaders(response) {
+      const headers = {};
+      for (const [key, value] of response.headers.entries()) {
+        headers[key] = shouldRedactHeader(key) ? redactSecret(value) : value;
+      }
+      return headers;
+    }
+
+    function shouldRedactHeader(key) {
+      const normalized = key.toLowerCase();
+      return normalized === "authorization"
+        || normalized === "x-api-key"
+        || normalized.includes("token")
+        || normalized.includes("secret")
+        || normalized.includes("key");
+    }
+
+    function redactSecret(value) {
+      if (!value) return "";
+      if (value.length <= 12) return "***";
+      return `${value.slice(0, 8)}...${value.slice(-4)}`;
+    }
+
     async function refreshHealth() {
       try {
         const response = await fetch("/health");
         const health = await response.json();
         els.healthDot.className = `dot ${response.ok ? "ok" : "bad"}`;
-        els.healthText.textContent = health.status || response.status;
-        els.auditState.textContent = health.audit_enabled ? "on" : "off";
+        els.healthText.textContent = health.status === "healthy" ? t("healthy") : (health.status || response.status);
+        els.auditState.textContent = health.audit_enabled ? t("on") : t("off");
         els.agentCount.textContent = health.upstream_agents ?? "-";
         renderMeta([
-          ["health", JSON.stringify(health)],
+          [t("health"), JSON.stringify(health)],
           ["origin", location.origin],
-          ["updated", new Date().toLocaleTimeString()]
+          [t("updated"), new Date().toLocaleTimeString()]
         ]);
       } catch (error) {
         els.healthDot.className = "dot bad";
-        els.healthText.textContent = "offline";
+        els.healthText.textContent = t("offline");
         renderMeta([
-          ["health", "unreachable"],
+          [t("health"), t("unreachable")],
           ["error", error.message]
         ]);
       }
@@ -734,20 +1254,24 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 
     async function sendRequest() {
       const started = performance.now();
-      els.sendRequest.disabled = true;
-      els.responseBox.textContent = "Sending...";
+      const controller = new AbortController();
+      state.activeController = controller;
+      setBusy(true);
+      els.responseBox.textContent = t("sending");
 
       try {
         const path = endpointPath();
         const headers = collectHeaders();
         const body = collectBody();
+        pushHistory(requestSnapshot("send"));
         state.lastCurl = makeCurl(path, headers, body);
         updateEndpointPreview();
 
         const response = await fetch(path, {
           method: "POST",
           headers,
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal: controller.signal
         });
 
         const elapsed = Math.round(performance.now() - started);
@@ -758,7 +1282,9 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           ["elapsed", `${elapsed} ms`],
           ["request id", requestId],
           ["audit", riskLevel],
-          ["endpoint", path]
+          ["endpoint", path],
+          ["request headers", JSON.stringify(redactHeaders(headers))],
+          ["response headers", JSON.stringify(responseHeaders(response))]
         ]);
 
         if (body.stream && response.body) {
@@ -768,14 +1294,29 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
           els.responseBox.textContent = formatMaybeJson(text);
         }
       } catch (error) {
-        els.responseBox.textContent = error.message;
+        const aborted = error.name === "AbortError";
+        els.responseBox.textContent = aborted ? t("requestAborted") : error.message;
         renderMeta([
-          ["status", "client error"],
-          ["error", error.message]
+          ["status", aborted ? t("aborted") : t("clientError")],
+          ["error", aborted ? t("requestAbortedByUser") : error.message]
         ]);
       } finally {
-        els.sendRequest.disabled = false;
+        if (state.activeController === controller) {
+          state.activeController = null;
+          setBusy(false);
+        }
       }
+    }
+
+    function setBusy(isBusy) {
+      els.sendRequest.disabled = isBusy;
+      els.abortRequest.disabled = !isBusy;
+      els.previewRequest.disabled = isBusy;
+      els.copyCurl.disabled = isBusy;
+    }
+
+    function abortRequest() {
+      state.activeController?.abort();
     }
 
     async function readStream(response) {
@@ -793,7 +1334,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       }
 
       output += decoder.decode();
-      els.responseBox.textContent = output || "(empty stream)";
+      els.responseBox.textContent = output || t("emptyStream");
     }
 
     function formatMaybeJson(text) {
@@ -811,8 +1352,17 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       state.lastCurl = makeCurl(path, headers, body);
       await writeClipboard(state.lastCurl);
       renderMeta([
-        ["copied", "cURL"],
+        [t("copied"), "cURL"],
         ["endpoint", path]
+      ]);
+    }
+
+    async function copyResponse() {
+      const text = els.responseBox.textContent || "";
+      await writeClipboard(text);
+      renderMeta([
+        [t("copied"), t("response")],
+        ["bytes", text.length]
       ]);
     }
 
@@ -839,24 +1389,35 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
     }
 
     els.originLabel.textContent = location.origin;
+    els.languageSelect.addEventListener("change", () => setLanguage(els.languageSelect.value));
     els.refreshHealth.addEventListener("click", refreshHealth);
     els.protoOpenAI.addEventListener("click", () => updateProtocol("openai"));
     els.protoAnthropic.addEventListener("click", () => updateProtocol("anthropic"));
+    els.agentSelect.addEventListener("change", updateAgentSelection);
     els.agentId.addEventListener("input", updateEndpointPreview);
+    els.historyList.addEventListener("click", onHistoryClick);
+    els.clearHistory.addEventListener("click", clearHistory);
     els.stream.addEventListener("change", () => {
       const body = collectBody();
       body.stream = els.stream.checked;
       writeBody(body);
     });
     els.formatBody.addEventListener("click", () => writeBody(collectBody()));
+    els.previewRequest.addEventListener("click", previewRequest);
     els.copyCurl.addEventListener("click", copyCurl);
+    els.abortRequest.addEventListener("click", abortRequest);
     els.sendRequest.addEventListener("click", sendRequest);
+    els.copyResponse.addEventListener("click", copyResponse);
     els.clearOutput.addEventListener("click", () => {
-      els.responseBox.textContent = "No response yet.";
+      els.responseBox.textContent = t("noResponse");
       renderMeta([]);
     });
 
+    els.agentId.disabled = true;
+    setLanguage(storedLanguageMode(), false);
+    renderHistory();
     updateProtocol("openai");
+    loadUiConfig();
     refreshHealth();
   </script>
 </body>
@@ -870,15 +1431,39 @@ mod tests {
     #[test]
     fn embedded_ui_contains_core_controls() {
         assert!(INDEX_HTML.contains("id=\"sendRequest\""));
+        assert!(INDEX_HTML.contains("id=\"abortRequest\""));
+        assert!(INDEX_HTML.contains("id=\"previewRequest\""));
+        assert!(INDEX_HTML.contains("id=\"copyResponse\""));
         assert!(INDEX_HTML.contains("id=\"copyCurl\""));
+        assert!(INDEX_HTML.contains("id=\"historyList\""));
         assert!(INDEX_HTML.contains("id=\"extraHeaders\""));
+        assert!(INDEX_HTML.contains("id=\"agentSelect\""));
         assert!(INDEX_HTML.contains("id=\"responseBox\""));
+        assert!(INDEX_HTML.contains("id=\"languageSelect\""));
         assert!(INDEX_HTML.contains("/v1/agents/"));
+        assert!(INDEX_HTML.contains("/ui/config"));
     }
 
     #[test]
     fn embedded_ui_declares_inline_favicon() {
         assert!(INDEX_HTML.contains("rel=\"icon\""));
         assert!(INDEX_HTML.contains("data:image/svg+xml"));
+    }
+
+    #[test]
+    fn embedded_ui_redacts_sensitive_header_names() {
+        assert!(INDEX_HTML.contains("shouldRedactHeader"));
+        assert!(INDEX_HTML.contains("authorization"));
+        assert!(INDEX_HTML.contains("x-api-key"));
+    }
+
+    #[test]
+    fn embedded_ui_contains_language_adapter() {
+        assert!(INDEX_HTML.contains("const I18N"));
+        assert!(INDEX_HTML.contains("setLanguage"));
+        assert!(INDEX_HTML.contains("localStorage"));
+        assert!(INDEX_HTML.contains("llm-shadow-relay-language"));
+        assert!(INDEX_HTML.contains("中文"));
+        assert!(INDEX_HTML.contains("复制响应"));
     }
 }

@@ -44,6 +44,37 @@ pub struct HealthResponse {
     pub default_upstream_timeout: u64,
 }
 
+/// Redacted configuration summary for the embedded Web UI.
+#[derive(Debug, Serialize)]
+pub struct UiConfigResponse {
+    pub upstream: UiUpstreamSummary,
+    pub agents: Vec<UiAgentSummary>,
+    pub audit: UiAuditSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UiUpstreamSummary {
+    pub protocol: UpstreamProtocol,
+    pub default_model: String,
+    pub pass_through_headers: bool,
+    pub has_configured_api_key: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UiAgentSummary {
+    pub id: String,
+    pub protocol: UpstreamProtocol,
+    pub default_model: String,
+    pub pass_through_headers: bool,
+    pub has_configured_api_key: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UiAuditSummary {
+    pub enabled: bool,
+    pub additional_agents: usize,
+}
+
 /// Extract all user message text from a request for auditing
 fn extract_request_content(request: &ChatCompletionRequest) -> String {
     request
@@ -801,6 +832,49 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
     })
 }
 
+/// Redacted configuration endpoint for the embedded Web UI.
+pub async fn ui_config(State(state): State<Arc<AppState>>) -> Json<UiConfigResponse> {
+    let (audit_enabled, audit_agents) = {
+        let engine = state.audit_engine.read().await;
+        (engine.is_enabled(), engine.additional_agent_count())
+    };
+
+    let mut agents = state
+        .upstream_agents
+        .iter()
+        .map(|(id, upstream)| UiAgentSummary {
+            id: id.clone(),
+            protocol: upstream.protocol.clone(),
+            default_model: upstream.default_model.clone(),
+            pass_through_headers: upstream.pass_through_headers,
+            has_configured_api_key: has_configured_api_key(upstream),
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|a, b| a.id.cmp(&b.id));
+
+    Json(UiConfigResponse {
+        upstream: UiUpstreamSummary {
+            protocol: state.upstream.protocol.clone(),
+            default_model: state.upstream.default_model.clone(),
+            pass_through_headers: state.upstream.pass_through_headers,
+            has_configured_api_key: has_configured_api_key(&state.upstream),
+        },
+        agents,
+        audit: UiAuditSummary {
+            enabled: audit_enabled,
+            additional_agents: audit_agents,
+        },
+    })
+}
+
+fn has_configured_api_key(upstream: &UpstreamConfig) -> bool {
+    upstream
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +906,20 @@ mod tests {
         let auth = resolve_upstream_auth(&upstream, Some(&headers));
 
         assert_eq!(auth.as_deref(), Some("Bearer configured-key"));
+    }
+
+    #[test]
+    fn test_has_configured_api_key_detects_non_empty_key() {
+        let upstream = upstream(UpstreamProtocol::OpenAi, Some(" configured-key "));
+
+        assert!(has_configured_api_key(&upstream));
+    }
+
+    #[test]
+    fn test_has_configured_api_key_treats_empty_key_as_passthrough() {
+        let upstream = upstream(UpstreamProtocol::OpenAi, Some("   "));
+
+        assert!(!has_configured_api_key(&upstream));
     }
 
     #[test]

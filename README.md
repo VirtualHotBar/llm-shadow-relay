@@ -96,7 +96,11 @@ protocol = "anthropic"
 ### 4. Use
 
 **Web UI:**
-Open `http://127.0.0.1:8080/ui` in your browser to inspect health, compose requests, choose named agents, and view responses.
+Open `http://127.0.0.1:8080/ui` in your browser to inspect health, compose requests, choose configured named agents, and view responses. The UI reads `/ui/config` for a redacted summary of protocol, default model, header passthrough, and agent ids; API keys are not exposed.
+The Web UI supports English and Chinese labels, with an auto mode that follows the browser language. Manual language choice is stored locally in the browser.
+Use **Preview** to inspect the final request URL, body, and redacted headers before sending. After a request, the metadata panel shows redacted request and response headers alongside status, latency, request id, and audit headers.
+Long-running requests can be cancelled with **Abort**, and response output can be copied directly from the response toolbar.
+The UI keeps a short in-memory request history for quick replay and cURL copy; history is cleared when the page is reloaded.
 
 **OpenAI client:**
 ```bash

@@ -33,7 +33,7 @@ use audit::AuditEngine;
 use config::{AuditConfig, Config, PolicyConfig, UpstreamConfig};
 use proxy::{
     handle_agent_anthropic_completion, handle_agent_chat_completion, handle_anthropic_completion,
-    handle_chat_completion, health_check, AppState,
+    handle_chat_completion, health_check, ui_config, AppState,
 };
 use webui::web_ui;
 
@@ -190,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Embedded Web UI
         .route("/", get(web_ui))
         .route("/ui", get(web_ui))
+        .route("/ui/config", get(ui_config))
         // Health check
         .route("/health", get(health_check))
         // OpenAI-compatible endpoints
