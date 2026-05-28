@@ -14,3 +14,5 @@ proxy_output.log
 .idea/
 *.swp
 *.swo
+llm-shadow-relay-*.png
+.playwright-mcp

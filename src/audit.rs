@@ -1,10 +1,23 @@
 //! Audit engine for LLM Shadow Relay - uses a trusted small model to audit LLM responses
 
-use crate::config::{AuditConfig, AuditMode, PolicyConfig};
+use crate::config::{AuditAgentConfig, AuditConfig, AuditMode, PolicyConfig};
 use crate::error::{AuditDecision, AuditFinding, Error, Result};
 use base64::{engine::general_purpose, Engine as _};
+use futures::future::join_all;
 use reqwest::Client;
 use tracing::{debug, error, info, warn};
+
+#[derive(Clone)]
+struct AuditModelAgent {
+    name: String,
+    provider: String,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: String,
+    temperature: f32,
+    max_tokens: u32,
+    system_prompt: String,
+}
 
 /// Audit engine that uses a small trusted model to audit responses
 pub struct AuditEngine {
@@ -13,6 +26,7 @@ pub struct AuditEngine {
     policy: PolicyConfig,
     system_prompt: String,
     audit_schema: String,
+    agents: Vec<AuditModelAgent>,
 }
 
 impl AuditEngine {
@@ -20,6 +34,14 @@ impl AuditEngine {
     pub fn new(config: AuditConfig, policy: PolicyConfig, client: Client) -> Self {
         let system_prompt = Self::build_system_prompt(&config, &policy);
         let audit_schema = Self::build_audit_schema();
+        let agents = config
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(index, agent)| {
+                Self::resolve_audit_agent(index, agent, &config, &policy, &system_prompt)
+            })
+            .collect();
 
         Self {
             client,
@@ -27,6 +49,7 @@ impl AuditEngine {
             policy,
             system_prompt,
             audit_schema,
+            agents,
         }
     }
 
@@ -43,6 +66,11 @@ impl AuditEngine {
     /// Returns whether audit headers should be included in responses
     pub fn policy_include_headers(&self) -> bool {
         self.policy.include_headers
+    }
+
+    /// Number of additional audit agents configured beside the primary model
+    pub fn additional_agent_count(&self) -> usize {
+        self.agents.len()
     }
 
     /// Async audit: runs audit in background, logs result, never blocks the caller.
@@ -194,7 +222,7 @@ Output your audit decision as JSON following the schema:
             content, self.audit_schema
         );
 
-        let decision = self.call_audit_model(&prompt).await?;
+        let decision = self.call_audit_agents(&prompt).await?;
         let decision = Self::merge_decisions(decision, Self::deterministic_scan(content));
 
         // Apply policy rules
@@ -248,7 +276,7 @@ If ANY risk is detected above medium severity, set "allowed" to false.
             content, self.audit_schema
         );
 
-        let decision = self.call_audit_model(&prompt).await?;
+        let decision = self.call_audit_agents(&prompt).await?;
         let decision = Self::merge_decisions(decision, Self::deterministic_scan(content));
         let final_decision = self.apply_policy(&decision);
 
@@ -298,51 +326,162 @@ Respond with JSON only:
             content
         );
 
-        let decision = self.call_audit_model(&prompt).await?;
+        let decision = self.call_audit_agents(&prompt).await?;
         Ok(Self::merge_decisions(decision, deterministic))
     }
 
-    /// Call the audit model (supports OpenAI, Anthropic, Ollama, etc.)
-    async fn call_audit_model(&self, prompt: &str) -> Result<AuditDecision> {
+    fn resolve_audit_agent(
+        index: usize,
+        agent: &AuditAgentConfig,
+        parent: &AuditConfig,
+        policy: &PolicyConfig,
+        parent_system_prompt: &str,
+    ) -> AuditModelAgent {
+        let mut prompt_parent = parent.clone();
+        if let Some(system_prompt) = &agent.system_prompt {
+            prompt_parent.system_prompt = Some(system_prompt.clone());
+        }
+
+        AuditModelAgent {
+            name: agent
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("audit-agent-{}", index + 1)),
+            provider: agent
+                .provider
+                .clone()
+                .unwrap_or_else(|| parent.provider.clone()),
+            base_url: agent.base_url.clone().or_else(|| parent.base_url.clone()),
+            api_key: agent.api_key.clone().or_else(|| parent.api_key.clone()),
+            model: agent.model.clone().unwrap_or_else(|| parent.model.clone()),
+            temperature: agent.temperature.unwrap_or(parent.temperature),
+            max_tokens: agent.max_tokens.unwrap_or(parent.max_tokens),
+            system_prompt: agent.system_prompt.clone().unwrap_or_else(|| {
+                if parent.system_prompt.is_some() {
+                    parent_system_prompt.to_string()
+                } else {
+                    Self::build_system_prompt(&prompt_parent, policy)
+                }
+            }),
+        }
+    }
+
+    /// Call the primary audit model plus any configured secondary audit agents.
+    async fn call_audit_agents(&self, prompt: &str) -> Result<AuditDecision> {
+        if self.agents.is_empty() {
+            return self.call_primary_audit_model(prompt).await;
+        }
+
+        let mut calls = Vec::with_capacity(self.agents.len() + 1);
+        calls.push(self.call_audit_model_with(
+            "primary",
+            &self.config.provider,
+            self.config.base_url.as_deref(),
+            self.config.api_key.as_deref(),
+            &self.config.model,
+            self.config.temperature,
+            self.config.max_tokens,
+            &self.system_prompt,
+            prompt,
+        ));
+
+        for agent in &self.agents {
+            calls.push(self.call_audit_model_with(
+                &agent.name,
+                &agent.provider,
+                agent.base_url.as_deref(),
+                agent.api_key.as_deref(),
+                &agent.model,
+                agent.temperature,
+                agent.max_tokens,
+                &agent.system_prompt,
+                prompt,
+            ));
+        }
+
+        let mut results = join_all(calls).await.into_iter();
+        let mut decision = results
+            .next()
+            .expect("primary audit call must be present")?;
+
+        for (agent, result) in self.agents.iter().zip(results) {
+            match result {
+                Ok(agent_decision) => {
+                    decision = Self::merge_decisions(decision, agent_decision);
+                }
+                Err(e) => {
+                    warn!("Secondary audit agent '{}' failed: {}", agent.name, e);
+                }
+            }
+        }
+
+        Ok(decision)
+    }
+
+    async fn call_primary_audit_model(&self, prompt: &str) -> Result<AuditDecision> {
+        self.call_audit_model_with(
+            "primary",
+            &self.config.provider,
+            self.config.base_url.as_deref(),
+            self.config.api_key.as_deref(),
+            &self.config.model,
+            self.config.temperature,
+            self.config.max_tokens,
+            &self.system_prompt,
+            prompt,
+        )
+        .await
+    }
+
+    /// Call one audit model (supports OpenAI, Anthropic, Ollama, etc.)
+    async fn call_audit_model_with(
+        &self,
+        agent_name: &str,
+        provider: &str,
+        base_url: Option<&str>,
+        api_key: Option<&str>,
+        model: &str,
+        temperature: f32,
+        max_tokens: u32,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<AuditDecision> {
         let base_url = self
-            .config
-            .base_url
-            .as_deref()
+            .normalize_base_url(base_url)
             .unwrap_or("https://api.openai.com/v1");
-        let model = &self.config.model;
-        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        let api_key = api_key.unwrap_or("");
 
         // Build request based on provider
-        let request_body = match self.config.provider.as_str() {
+        let request_body = match provider {
             "openai" => {
                 serde_json::json!({
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": self.system_prompt},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": self.config.temperature,
-                    "max_tokens": self.config.max_tokens,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
                     "response_format": {"type": "json_object"}
                 })
             }
             "ollama" | "local" => {
                 serde_json::json!({
                     "model": model,
-                    "prompt": format!("System: {}\n\nUser: {}", self.system_prompt, prompt),
-                    "temperature": self.config.temperature,
+                    "prompt": format!("System: {}\n\nUser: {}", system_prompt, prompt),
+                    "temperature": temperature,
                     "format": "json",
                     "options": {
-                        "num_predict": self.config.max_tokens
+                        "num_predict": max_tokens
                     }
                 })
             }
             "anthropic" => {
                 serde_json::json!({
                     "model": model,
-                    "max_tokens": self.config.max_tokens,
-                    "temperature": self.config.temperature,
-                    "system": self.system_prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "system": system_prompt,
                     "messages": [{"role": "user", "content": prompt}]
                 })
             }
@@ -351,24 +490,24 @@ Respond with JSON only:
                 serde_json::json!({
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": self.system_prompt},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": self.config.temperature,
-                    "max_tokens": self.config.max_tokens
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
                 })
             }
         };
 
         // Determine endpoint
-        let endpoint = match self.config.provider.as_str() {
+        let endpoint = match provider {
             "anthropic" => format!("{}/messages", base_url),
             _ => format!("{}/chat/completions", base_url),
         };
 
         debug!(
-            "Calling audit model: {} at {}",
-            self.config.provider, endpoint
+            "Calling audit agent '{}': {} at {}",
+            agent_name, provider, endpoint
         );
 
         let mut request = self
@@ -378,7 +517,7 @@ Respond with JSON only:
             .header("Accept", "application/json");
 
         if !api_key.is_empty() {
-            match self.config.provider.as_str() {
+            match provider {
                 "anthropic" => {
                     request = request.header("x-api-key", api_key);
                 }
@@ -443,19 +582,23 @@ Respond with JSON only:
             Error::AuditFailed("Audit model request exhausted retries".to_string())
         })?;
         // Extract the actual model output from the API response wrapper
-        let audit_content = self.extract_audit_content(&response_text)?;
+        let audit_content = self.extract_audit_content(provider, &response_text)?;
         let decision = self.parse_audit_response(&audit_content)?;
 
         Ok(decision)
     }
 
+    fn normalize_base_url<'a>(&self, base_url: Option<&'a str>) -> Option<&'a str> {
+        base_url.filter(|url| !url.trim().is_empty())
+    }
+
     /// Extract the actual model output content from an API response wrapper
-    fn extract_audit_content(&self, response: &str) -> Result<String> {
+    fn extract_audit_content(&self, provider: &str, response: &str) -> Result<String> {
         let parsed: serde_json::Value = serde_json::from_str(response).map_err(|e| {
             Error::AuditFailed(format!("Failed to parse audit API response: {}", e))
         })?;
 
-        let content = match self.config.provider.as_str() {
+        let content = match provider {
             "anthropic" => {
                 // Anthropic response: content[0].text
                 parsed["content"][0]["text"]
@@ -964,6 +1107,64 @@ mod tests {
             "在渗透测试中，常用的工具包括 Metasploit、Nmap 等。以下是一份合法授权测试的报告模板。",
         );
         assert!(decision.allowed);
+    }
+
+    #[test]
+    fn test_secondary_audit_agents_inherit_parent_defaults() {
+        let mut config = Config::from_toml(include_str!("../config.example.toml")).unwrap();
+        config.audit.provider = "openai".to_string();
+        config.audit.base_url = Some("https://audit.example/v1".to_string());
+        config.audit.api_key = Some("sk-audit".to_string());
+        config.audit.model = "gpt-4o-mini".to_string();
+        config.audit.temperature = 0.2;
+        config.audit.max_tokens = 500;
+        config.audit.agents = vec![AuditAgentConfig {
+            name: Some("strict-reviewer".to_string()),
+            model: Some("gpt-4o".to_string()),
+            temperature: Some(0.0),
+            ..Default::default()
+        }];
+
+        let engine = AuditEngine::new(config.audit, config.policy, Client::new());
+
+        assert_eq!(engine.additional_agent_count(), 1);
+        assert_eq!(engine.agents[0].name, "strict-reviewer");
+        assert_eq!(engine.agents[0].provider, "openai");
+        assert_eq!(
+            engine.agents[0].base_url.as_deref(),
+            Some("https://audit.example/v1")
+        );
+        assert_eq!(engine.agents[0].api_key.as_deref(), Some("sk-audit"));
+        assert_eq!(engine.agents[0].model, "gpt-4o");
+        assert_eq!(engine.agents[0].temperature, 0.0);
+        assert_eq!(engine.agents[0].max_tokens, 500);
+    }
+
+    #[test]
+    fn test_merge_decisions_keeps_stricter_agent_result() {
+        let pass = AuditDecision::pass();
+        let block = AuditDecision {
+            allowed: false,
+            risk_level: "critical".to_string(),
+            risk_score: 0.95,
+            findings: vec![AuditFinding {
+                category: "tool_call_insertion".to_string(),
+                severity: "critical".to_string(),
+                description: "blocked by secondary agent".to_string(),
+                evidence: Some("tool_calls".to_string()),
+            }],
+            blocked_reason: Some("blocked by secondary agent".to_string()),
+        };
+
+        let merged = AuditEngine::merge_decisions(pass, block);
+
+        assert!(!merged.allowed);
+        assert_eq!(merged.risk_level, "critical");
+        assert_eq!(merged.risk_score, 0.95);
+        assert_eq!(
+            merged.blocked_reason.as_deref(),
+            Some("blocked by secondary agent")
+        );
     }
 
     #[tokio::test]
